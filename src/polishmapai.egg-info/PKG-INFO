@@ -1,9 +1,0 @@
-Metadata-Version: 2.4
-Name: polishmapai
-Version: 0.1.0
-Summary: Lossless Polish MP cartographic editor for Windows
-Requires-Python: >=3.11
-Requires-Dist: pyshp<3,>=2.3
-Provides-Extra: dev
-Requires-Dist: pytest>=8; extra == "dev"
-Requires-Dist: pyinstaller>=6; extra == "dev"
