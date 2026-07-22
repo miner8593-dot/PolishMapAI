@@ -1,0 +1,11 @@
+__pycache__/
+*.egg-info/
+*.py[cod]
+.pytest_cache/
+.venv/
+.tcl-runtime/
+build/
+dist/
+artifacts/
+*.spec
+*.mp.bak
