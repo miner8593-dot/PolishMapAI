@@ -8,6 +8,7 @@ import queue
 import sys
 import threading
 import time
+import traceback
 import webbrowser
 from decimal import Decimal
 from pathlib import Path
@@ -58,7 +59,11 @@ class Editor(tk.Tk):
         self.last_cursor_coordinate = None; self.goto_marker = None
         self.metrics: list[str] = []
         self.view_options = self._load_view_options()
-        self.view_vars = {name: tk.BooleanVar(value=value) for name, value in self.view_options.items()}
+        self.view_vars = {
+            name: tk.BooleanVar(value=value)
+            for name, value in self.view_options.items()
+            if isinstance(value, bool)
+        }
         self._build_menu(); self._build_ui(); self._bind_keys(); self._update_commands()
 
     # ----- interface -------------------------------------------------
@@ -506,4 +511,13 @@ class Editor(tk.Tk):
 
 def main():
     logging.basicConfig(level=logging.INFO,format="%(asctime)s %(name)s %(message)s")
-    Editor().mainloop()
+    try:
+        Editor().mainloop()
+    except Exception:
+        # Windowed PyInstaller builds have no stderr. Keep a deterministic
+        # startup diagnostic beside the executable for CI and users.
+        if getattr(sys, "frozen", False):
+            Path(sys.executable).with_name("PolishMapAI-startup-error.log").write_text(
+                traceback.format_exc(), encoding="utf-8"
+            )
+        raise

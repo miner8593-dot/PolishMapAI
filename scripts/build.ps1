@@ -21,6 +21,8 @@ do {
 if ($Smoke.HasExited -or $Smoke.MainWindowTitle -notlike "PolishMapAI*") {
     $Observed = if ($Smoke.HasExited) { "exit code $($Smoke.ExitCode)" } else { "window '$($Smoke.MainWindowTitle)'" }
     if (-not $Smoke.HasExited) { Stop-Process -Id $Smoke.Id -Force }
+    $StartupLog = Join-Path (Split-Path -Parent $BuiltExe) "PolishMapAI-startup-error.log"
+    if (Test-Path -LiteralPath $StartupLog) { Get-Content -LiteralPath $StartupLog }
     throw "Packaged PolishMapAI failed GUI smoke test: $Observed"
 }
 Stop-Process -Id $Smoke.Id -Force
