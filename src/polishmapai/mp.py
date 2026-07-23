@@ -5,6 +5,7 @@ from decimal import Decimal, InvalidOperation
 import copy
 import re
 from pathlib import Path
+from typing import Callable
 
 SECTION_RE = re.compile(r"^\s*\[([^]]+)]\s*$")
 PAIR_RE = re.compile(r"^([^=]+)=(.*)$")
@@ -61,6 +62,17 @@ class MpSection:
                         pass
         return coords
 
+    def translate(self, delta_lat: Decimal, delta_lon: Decimal) -> None:
+        """Translate every Data*/coordinate pair without collapsing detail levels."""
+        for key, value, index in self.pairs():
+            if not key.strip().lower().startswith("data"):
+                continue
+            def replace(match: re.Match) -> str:
+                lat = Decimal(match.group(1)) + delta_lat
+                lon = Decimal(match.group(2)) + delta_lon
+                return f"({lat:f},{lon:f})"
+            self.lines[index].text = f"{key}={COORD_RE.sub(replace, value)}"
+
     @property
     def is_object(self) -> bool:
         return self.name.upper() in OBJECT_SECTIONS or bool(self.coordinates())
@@ -90,13 +102,23 @@ class MpDocument:
         return lines
 
     @classmethod
-    def from_bytes(cls, data: bytes, path: Path | None = None) -> "MpDocument":
+    def from_bytes(
+        cls, data: bytes, path: Path | None = None,
+        progress: Callable[[int, int], None] | None = None,
+        cancelled: Callable[[], bool] | None = None,
+    ) -> "MpDocument":
         text = data.decode("cp1251")
         all_lines = cls._split(text)
         prefix: list[MpLine] = []
         sections: list[MpSection] = []
         current: MpSection | None = None
-        for line in all_lines:
+        total = len(all_lines)
+        for number, line in enumerate(all_lines, 1):
+            if number % 5000 == 0:
+                if cancelled and cancelled():
+                    raise InterruptedError("Загрузка отменена")
+                if progress:
+                    progress(number, total)
             match = SECTION_RE.match(line.text)
             if match:
                 name = match.group(1)
@@ -110,12 +132,14 @@ class MpDocument:
                 prefix.append(line)
             else:
                 current.lines.append(line)
+        if progress:
+            progress(total, total)
         return cls(prefix, sections, original_bytes=data, path=path)
 
     @classmethod
-    def load(cls, path: str | Path) -> "MpDocument":
+    def load(cls, path: str | Path, progress=None, cancelled=None) -> "MpDocument":
         file_path = Path(path)
-        return cls.from_bytes(file_path.read_bytes(), file_path)
+        return cls.from_bytes(file_path.read_bytes(), file_path, progress, cancelled)
 
     @property
     def newline(self) -> str:

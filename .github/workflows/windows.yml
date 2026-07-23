@@ -13,7 +13,11 @@ jobs:
       - uses: actions/checkout@v5
       - uses: actions/setup-python@v6
         with:
-          python-version: '3.12'
+          # 3.12 toolcache currently pairs _tkinter with a Tcl layout that
+          # fails after relocation in the portable PyInstaller bundle.
+          # 3.11.9 is the last full Windows installer release and ships a
+          # relocatable Tcl/Tk runtime.
+          python-version: '3.11.9'
           cache: pip
       - name: Test and build
         shell: powershell
