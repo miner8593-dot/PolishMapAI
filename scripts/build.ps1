@@ -12,10 +12,16 @@ $Python = if (Test-Path ".venv\Scripts\python.exe") { ".venv\Scripts\python.exe"
 # A successful PyInstaller exit is insufficient: a broken Tcl/Tk bundle exits
 # immediately before creating the editor window. Keep this smoke test in CI.
 $BuiltExe = Join-Path $ProjectRoot "dist\PolishMapAI\PolishMapAI.exe"
-$Smoke = Start-Process -FilePath $BuiltExe -PassThru -WindowStyle Hidden
-Start-Sleep -Seconds 4
-if ($Smoke.HasExited) {
-    throw "Packaged PolishMapAI exited during GUI smoke test (exit code $($Smoke.ExitCode))"
+$Smoke = Start-Process -FilePath $BuiltExe -PassThru
+$Deadline = (Get-Date).AddSeconds(12)
+do {
+    Start-Sleep -Milliseconds 250
+    $Smoke.Refresh()
+} while (-not $Smoke.HasExited -and $Smoke.MainWindowTitle -notlike "PolishMapAI*" -and (Get-Date) -lt $Deadline)
+if ($Smoke.HasExited -or $Smoke.MainWindowTitle -notlike "PolishMapAI*") {
+    $Observed = if ($Smoke.HasExited) { "exit code $($Smoke.ExitCode)" } else { "window '$($Smoke.MainWindowTitle)'" }
+    if (-not $Smoke.HasExited) { Stop-Process -Id $Smoke.Id -Force }
+    throw "Packaged PolishMapAI failed GUI smoke test: $Observed"
 }
 Stop-Process -Id $Smoke.Id -Force
 

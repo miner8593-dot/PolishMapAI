@@ -5,12 +5,21 @@ import logging
 import math
 import os
 import queue
+import sys
 import threading
 import time
-import tkinter as tk
 import webbrowser
 from decimal import Decimal
 from pathlib import Path
+
+# PyInstaller's standard Tk runtime hook runs before application code and may
+# leave Tcl 8.6.15 with a backslash-form library path that it rejects on
+# Windows. Override it before the first Tk interpreter is constructed.
+if getattr(sys, "_MEIPASS", ""):
+    os.environ["TCL_LIBRARY"] = os.path.join(sys._MEIPASS, "_tcl_data").replace("\\", "/")
+    os.environ["TK_LIBRARY"] = os.path.join(sys._MEIPASS, "_tk_data").replace("\\", "/")
+
+import tkinter as tk
 from tkinter import filedialog, messagebox, simpledialog, ttk
 
 from .coordinates import format_coordinates, parse_coordinates
