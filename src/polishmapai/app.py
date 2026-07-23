@@ -5,6 +5,7 @@ import logging
 import math
 import os
 import queue
+import shutil
 import sys
 import threading
 import time
@@ -17,8 +18,15 @@ from pathlib import Path
 # leave Tcl 8.6.15 with a backslash-form library path that it rejects on
 # Windows. Override it before the first Tk interpreter is constructed.
 if getattr(sys, "_MEIPASS", ""):
-    os.environ["TCL_LIBRARY"] = os.path.join(sys._MEIPASS, "_tcl_data").replace("\\", "/")
-    os.environ["TK_LIBRARY"] = os.path.join(sys._MEIPASS, "_tk_data").replace("\\", "/")
+    runtime = Path(os.getenv("LOCALAPPDATA", Path.home())) / "PolishMapAI" / "tcl-runtime"
+    tcl_runtime = runtime / "tcl8.6"
+    tk_runtime = runtime / "tk8.6"
+    if not (tcl_runtime / "init.tcl").exists():
+        runtime.mkdir(parents=True, exist_ok=True)
+        shutil.copytree(Path(sys._MEIPASS) / "_tcl_data", tcl_runtime, dirs_exist_ok=True)
+        shutil.copytree(Path(sys._MEIPASS) / "_tk_data", tk_runtime, dirs_exist_ok=True)
+    os.environ["TCL_LIBRARY"] = tcl_runtime.as_posix()
+    os.environ["TK_LIBRARY"] = tk_runtime.as_posix()
 
 import tkinter as tk
 from tkinter import filedialog, messagebox, simpledialog, ttk
