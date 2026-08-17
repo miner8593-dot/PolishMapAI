@@ -1,14 +1,15 @@
 # PolishMapAI
 
-PolishMapAI is an independent Windows cartographic editor focused on Garmin Polish (`.mp`) files. It is clean-room software: no GPSMapEdit code, binaries, artwork, or closed resources are used.
+PolishMapAI is an independent Windows cartographic editor focused on Polish (`.mp`) source maps with the Navitel `TypeSet=NG` catalogue. It is clean-room software: no GPSMapEdit code, binaries, artwork, or closed resources are used.
 
 ## Current runnable baseline
 
 - Windows-1251 MP open/save with byte-identical no-op saves.
 - Preservation of comments, unknown keys, section order, coordinate text, and line endings.
-- Map canvas, zoom, pan, selection, POI/polyline/polygon creation, move/delete, properties, Undo/Redo, search, detail-level filter, and geometry checks.
+- Navitel cartographic rendering for roads, water, vegetation, land use, buildings and POI; Navitel type catalogue and type selector; day/night cartographic tables from Navitel NS2 skin archives (v1.x/v2).
+- Responsive progressive map canvas with latitude-corrected projection, zoom, pan, selection, multi-element geometries, POI/polyline/polygon creation, object and node move/delete, line split/join, properties, Undo/Redo, indexed NodeID/RoadID search, detail-level filter, and Navitel road-graph checks.
 - Shapefile import/export (`SHP/SHX/DBF`, plus `PRJ/CPG` sidecars).
-- OpenAI-compatible REST adapter with custom Base URL/model/timeout/system prompt, GeoJSON validation and preview/accept workflow.
+- OpenAI-compatible REST adapter and GeoJSON validation core; editor workflow integration is a later milestone.
 - API secrets stored with Windows Credential Manager.
 - Windows CI, portable ZIP, and self-contained installer EXE build scripts.
 
@@ -30,5 +31,4 @@ Artifacts are written to `artifacts/`.
 
 ## Scope
 
-Version 0.1 is a working foundation, not yet feature-parity with the mature GPSMapEdit product. Routing restrictions, advanced node editing, format edge cases, projections, and large-map performance are tracked for iterative implementation.
-
+The active branch is a working prototype under parity development. Routing restrictions, advanced road-graph editing, NS2 bitmap textures/POI sprite sheets, and remaining format edge cases are iterative milestones. The Navitel map appearance file supported here is `.NS2` (the Navitel counterpart to what is often informally called a TYP file).

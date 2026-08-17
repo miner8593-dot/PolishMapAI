@@ -51,12 +51,16 @@ class SpatialIndex:
         self._large: list[int] = []
         self.items: list[IndexedObject] = []
         self.bounds: BBox | None = None
+        self.node_ids: dict[str, list[MpSection]] = defaultdict(list)
+        self.road_ids: dict[str, list[MpSection]] = defaultdict(list)
 
     def clear(self) -> None:
         self._cells.clear()
         self._large.clear()
         self.items.clear()
         self.bounds = None
+        self.node_ids.clear()
+        self.road_ids.clear()
 
     def build(self, sections: Iterable[MpSection], progress=None, cancelled=None) -> None:
         self.clear()
@@ -68,6 +72,7 @@ class SpatialIndex:
                 continue
             item_id = len(self.items)
             self.items.append(IndexedObject(section, bbox))
+            self._index_ids(section)
             self._extend_bounds(bbox)
             cells = list(self._cell_range(bbox))
             if len(cells) > 4096:
@@ -84,6 +89,7 @@ class SpatialIndex:
             return
         item_id = len(self.items)
         self.items.append(IndexedObject(section, bbox))
+        self._index_ids(section)
         self._extend_bounds(bbox)
         cells = list(self._cell_range(bbox))
         if len(cells) > 4096:
@@ -100,6 +106,20 @@ class SpatialIndex:
         for cell in self._cell_range(bbox):
             ids.update(self._cells.get(cell, ()))
         return [self.items[i] for i in ids if intersects(self.items[i].bbox, bbox)]
+
+    def find_node_id(self, value: str) -> list[MpSection]:
+        return list(self.node_ids.get(value.strip(), ()))
+
+    def find_road_id(self, value: str) -> list[MpSection]:
+        return list(self.road_ids.get(value.strip(), ()))
+
+    def _index_ids(self, section: MpSection) -> None:
+        node_id = section.get("NodeID").strip()
+        road_id = section.get("RoadID").strip()
+        if node_id:
+            self.node_ids[node_id].append(section)
+        if road_id:
+            self.road_ids[road_id].append(section)
 
     def _cell_range(self, bbox: BBox):
         x0 = math.floor(bbox[0] / self.cell_size)

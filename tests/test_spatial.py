@@ -34,3 +34,12 @@ def test_spatial_index_100k_objects_performance():
     assert result
     assert build_seconds < 20
     assert query_seconds < 0.2
+
+
+def test_specialized_node_and_road_id_indices():
+    document = MpDocument([], [])
+    node = document.add_object("POI", [(55, 73)], NodeID="17")
+    road = document.add_object("POLYLINE", [(55, 73), (56, 74)], RoadID="42")
+    index = SpatialIndex(); index.build(document.objects())
+    assert index.find_node_id("17") == [node]
+    assert index.find_road_id("42") == [road]
