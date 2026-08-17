@@ -770,7 +770,11 @@ class Editor(tk.Tk):
 
     def _type_dialog(self, section_name, current):
         kind = object_kind(section_name)
-        table = {"point": POINT_NAMES, "line": LINE_NAMES, "polygon": POLYGON_NAMES}[kind]
+        table = dict({"point": POINT_NAMES, "line": LINE_NAMES, "polygon": POLYGON_NAMES}[kind])
+        for item in self.index.items:
+            if object_kind(item.section.name)==kind:
+                code=type_code(item.section.get("Type"));table.setdefault(code,type_name(item.section.name,hex(code)))
+        table.setdefault(current,type_name(section_name,hex(current)))
         win=tk.Toplevel(self);win.title("Выбор типа объекта — Navitel");win.transient(self);win.grab_set();win.geometry("580x520")
         result={"value":None};query=tk.StringVar()
         top=ttk.Frame(win,padding=8);top.pack(fill="x")
@@ -791,7 +795,14 @@ class Editor(tk.Tk):
             selection=tree.selection()
             if not selection:return
             result["value"]=int(tree.item(selection[0],"values")[0],16);win.destroy()
+        def custom():
+            raw=simpledialog.askstring("Код типа Navitel","Введите код, например 0x6C:",parent=win)
+            if raw is None:return
+            try:result["value"]=int(raw.strip(),0)
+            except ValueError:messagebox.showerror("Код типа","Некорректный код типа",parent=win);return
+            win.destroy()
         buttons=ttk.Frame(win,padding=8);buttons.pack(fill="x")
+        ttk.Button(buttons,text="Другой код…",command=custom).pack(side="left")
         ttk.Button(buttons,text="ОК",command=accept).pack(side="right",padx=4)
         ttk.Button(buttons,text="Отмена",command=win.destroy).pack(side="right")
         query.trace_add("write",populate);tree.bind("<Double-1>",accept);win.bind("<Return>",accept);win.bind("<Escape>",lambda e:win.destroy())
