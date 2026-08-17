@@ -64,6 +64,7 @@ class Editor(tk.Tk):
         self.loading_cancel = threading.Event(); self.worker_queue: queue.Queue = queue.Queue()
         self.render_after = None; self.wheel_after = None; self.resize_after = None
         self.render_generation = 0; self.render_state = None; self.drag_node = None
+        self.last_render_stats = {}
         self.render_reason = "viewport"; self.first_frame_pending = False
         self.context_coordinate = (0.0, 0.0)
         self.last_cursor_coordinate = None; self.goto_marker = None
@@ -236,6 +237,7 @@ class Editor(tk.Tk):
         reason = "first_frame" if self.first_frame_pending else state["reason"]
         self.first_frame_pending = False
         self._metric(reason, elapsed, f"candidates={len(candidates)} primitives={state['primitives']}")
+        self.last_render_stats = {"candidates":len(candidates),"primitives":state["primitives"],"elapsed_seconds":elapsed}
         self.render_reason = "viewport"; self.render_state = None
         suffix = f" — достигнут лимит {MAX_PRIMITIVES:,}, увеличьте масштаб" if limited else ""
         self.status.set(f"Вид: {len(candidates):,} кандидатов, {state['primitives']:,} примитивов, {elapsed*1000:.0f} мс{suffix}")
@@ -649,6 +651,7 @@ def _run_gui_smoke(path: Path):
             "elapsed_seconds": time.perf_counter() - started,
             "heartbeat_count": heartbeat["count"],
             "max_heartbeat_gap_ms": heartbeat["max_gap"] * 1000,
+            "render": app.last_render_stats,
             "metrics": app.metrics,
         }
         report_path = Path(os.getenv("POLISHMAPAI_SMOKE_REPORT", "PolishMapAI-smoke.json"))

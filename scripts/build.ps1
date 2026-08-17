@@ -33,7 +33,7 @@ if ($Smoke.ExitCode -ne 0 -or -not (Test-Path -LiteralPath $SmokeReport)) {
     throw "Packaged PolishMapAI GUI smoke test exited with code $($Smoke.ExitCode) without a valid report"
 }
 $SmokeResult = Get-Content -LiteralPath $SmokeReport -Raw | ConvertFrom-Json
-if (-not $SmokeResult.ok -or $SmokeResult.objects -lt 18000 -or $SmokeResult.max_heartbeat_gap_ms -gt 750) {
+if (-not $SmokeResult.ok -or $SmokeResult.objects -lt 18000 -or $SmokeResult.render.primitives -lt 12000 -or $SmokeResult.max_heartbeat_gap_ms -gt 750) {
     $SmokeResult | ConvertTo-Json -Depth 5
     throw "Packaged PolishMapAI GUI smoke test reported an unresponsive or incomplete run"
 }

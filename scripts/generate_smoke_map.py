@@ -11,9 +11,8 @@ def main(path: str, count: int = 18_000) -> None:
             row, column = divmod(number, 180)
             lat = 54.0 + row * 0.002; lon = 72.0 + column * 0.002
             stream.write(
-                "[POLYGON]\r\nType=0x4a\r\nEndLevel=9\r\n"
-                f"Data0=({lat:.6f},{lon:.6f}),({lat:.6f},{lon+.001:.6f}),"
-                f"({lat+.001:.6f},{lon+.001:.6f}),({lat:.6f},{lon:.6f})\r\n[END]\r\n"
+                "[POI]\r\nType=0x2f00\r\nEndLevel=9\r\n"
+                f"Data0=({lat:.6f},{lon:.6f})\r\n[END]\r\n"
             )
 
 
