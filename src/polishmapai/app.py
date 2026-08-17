@@ -327,16 +327,30 @@ class Editor(tk.Tk):
                                         dash=style.dash or (), capstyle="round", joinstyle="round",
                                         tags=("map", object_tag)); primitives += 1
         if self.view_vars["labels"].get() and obj.get("Label") and self.zoom >= .2:
-            x, y = point_groups[0][0]
-            offset = 7 if kind == "point" else 2
+            x,y,angle,anchor=self._label_position(point_groups,kind)
+            offset = 7 if kind == "point" else 0
             label = obj.get("Label").replace("~[0x1f]", " ")
             if self.view_vars["label_outline"].get():
                 for ox, oy in ((-1, 0), (1, 0), (0, -1), (0, 1)):
-                    self.canvas.create_text(x+offset+ox, y-7+oy, text=label, anchor="sw",
-                                            fill="#f8f7f2", tags=("map", object_tag)); primitives += 1
-            self.canvas.create_text(x+offset, y-7, text=label, anchor="sw", fill=style.label_color,
-                                    font=("Tahoma", 8), tags=("map",object_tag)); primitives += 1
+                    self.canvas.create_text(x+offset+ox,y+oy,text=label,anchor=anchor,angle=angle,
+                                            fill="#f8f7f2",font=("Tahoma",style.label_size),tags=("map",object_tag));primitives+=1
+            self.canvas.create_text(x+offset,y,text=label,anchor=anchor,angle=angle,fill=style.label_color,
+                                    font=("Tahoma",style.label_size),tags=("map",object_tag));primitives+=1
         return primitives
+
+    @staticmethod
+    def _label_position(point_groups,kind):
+        points=point_groups[0]
+        if kind=="point":return (*points[0],0,"w")
+        if kind=="polygon":
+            unique=points[:-1] if len(points)>2 and points[0]==points[-1] else points
+            return (sum(x for x,_ in unique)/len(unique),sum(y for _,y in unique)/len(unique),0,"center")
+        segments=[(math.hypot(b[0]-a[0],b[1]-a[1]),a,b) for group in point_groups for a,b in zip(group,group[1:])]
+        if not segments:return (*points[0],0,"center")
+        _,a,b=max(segments,key=lambda item:item[0]);angle=math.degrees(math.atan2(-(b[1]-a[1]),b[0]-a[0]))
+        if angle>90:angle-=180
+        if angle<-90:angle+=180
+        return ((a[0]+b[0])/2,(a[1]+b[1])/2,angle,"center")
 
     def _draw_navitel_point(self, point, style, object_tag, selected):
         x, y = point; color = "#1769aa" if selected else style.color

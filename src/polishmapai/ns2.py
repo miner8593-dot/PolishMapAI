@@ -45,6 +45,7 @@ class _PolygonEntry:
     outline: str
     label: str
     pattern: int
+    label_size: int
 
 
 @dataclass(frozen=True)
@@ -58,6 +59,7 @@ class _LineEntry:
     casing_width: int
     dash: tuple[int, ...] | None
     label: str
+    label_size: int
 
 
 class NavitelNs2Skin:
@@ -85,6 +87,7 @@ class NavitelNs2Skin:
             raise ValueError("Файл не является оформлением Navitel NS2")
         version = first.rsplit(" ", 1)[-1]
         blocks = _blocks(text)
+        fonts={match.group(1).lower():max(7,int(match.group(2))//2) for match in re.finditer(r"(?im)^([A-Za-z_]*Font\d*|Font\d+)\s+(\d+)\s+(?:true|false)",text)}
         colors = dict(PREDEFINED)
         for line in blocks.get("colors", []):
             parts=line.split()
@@ -100,7 +103,7 @@ class NavitelNs2Skin:
             except ValueError:continue
             if pattern == -2:fill=""
             outline=cls._color(parts[4],colors);label=cls._color(parts[6],colors)
-            entry=_PolygonEntry(scale,fill,outline,label,pattern)
+            entry=_PolygonEntry(scale,fill,outline,label,pattern,fonts.get(parts[8].lower(),8))
             for code in codes:polygons.setdefault(code,[]).append(entry)
         lines: dict[int, list[_LineEntry]] = {}
         for line in blocks.get("polylines", []):
@@ -112,7 +115,7 @@ class NavitelNs2Skin:
             except ValueError:continue
             color=cls._color(parts[6].split("/",1)[0],colors);casing=cls._color(parts[8],colors)
             label=cls._color(parts[10],colors);dash=(6,3) if parts[4].lower() in {"dash","dot"} else None
-            entry=_LineEntry(scale,frc_begin,frc_end,color,width,casing,casing_width,dash,label)
+            entry=_LineEntry(scale,frc_begin,frc_end,color,width,casing,casing_width,dash,label,fonts.get(parts[9].lower(),8))
             for code in range(begin,end+1):lines.setdefault(code,[]).append(entry)
         if not polygons and not lines:
             raise ValueError("В NS2 не найдены таблицы polygons/polylines")
@@ -146,10 +149,10 @@ class NavitelNs2Skin:
         if kind=="polygon" and code in self.polygons:
             entry=self._best(self.polygons[code],scale)
             stipple="" if entry.pattern<0 else ("gray12","gray25","gray50","gray75")[entry.pattern%4]
-            return NavitelStyle(base.name,entry.fill,entry.outline or base.outline,order=base.order,label_color=entry.label or base.label_color,stipple=stipple)
+            return NavitelStyle(base.name,entry.fill,entry.outline or base.outline,order=base.order,label_color=entry.label or base.label_color,stipple=stipple,label_size=entry.label_size)
         if kind=="line" and code in self.lines:
             frc=road_class(section);eligible=[e for e in self.lines[code] if e.frc_begin<=frc<=e.frc_end]
             if eligible:
                 entry=self._best(eligible,scale)
-                return NavitelStyle(base.name,color=entry.color or base.color,width=max(1,entry.width//2),casing=entry.casing,casing_width=max(0,entry.casing_width//2),dash=entry.dash,order=base.order,label_color=entry.label or base.label_color)
+                return NavitelStyle(base.name,color=entry.color or base.color,width=max(1,entry.width//2),casing=entry.casing,casing_width=max(0,entry.casing_width//2),dash=entry.dash,order=base.order,label_color=entry.label or base.label_color,label_size=entry.label_size)
         return base

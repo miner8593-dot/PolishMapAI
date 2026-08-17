@@ -6,6 +6,7 @@ from polishmapai.ns2 import NavitelNs2Skin
 
 
 SKIN = """Navitel Skin Version 1.6
+Font0 28 true true 1
 colors {
 BackgroundColorMap 0xCBD8C3
 }
@@ -36,3 +37,4 @@ def test_load_navitel_ns2_cartographic_tables(tmp_path: Path):
     assert skin.style_for(marsh).stipple=="gray50"
     assert skin.style_for(text).fill==""
     assert skin.style_for(road).color=="#dfb547"
+    assert skin.style_for(road).label_size==14
