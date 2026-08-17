@@ -113,11 +113,16 @@ class MpSection:
             if seen_element != occurrence:
                 continue
             seen = -1
+            raw_coords = COORD_RE.findall(value)
+            targets = {node_index}
+            if self.name.upper() in {"POLYGON", "RGN80"} and len(raw_coords) >= 2 and raw_coords[0] == raw_coords[-1]:
+                if node_index == 0:targets.add(len(raw_coords)-1)
+                elif node_index == len(raw_coords)-1:targets.add(0)
 
             def replace(match: re.Match) -> str:
                 nonlocal seen
                 seen += 1
-                if seen != node_index:
+                if seen not in targets:
                     return match.group(0)
                 return f"({latitude:f},{longitude:f})"
 
@@ -156,6 +161,39 @@ class MpSection:
                 cursor = match.end()
             parts.append(value[cursor:])
             self.lines[index].text = f"{key}={''.join(parts)}"
+
+    def insert_node(self, data_level: int, occurrence: int, after_index: int,
+                    latitude: Decimal, longitude: Decimal) -> None:
+        target=f"data{data_level}";seen=-1
+        for key,value,line_index in self.pairs():
+            if key.strip().lower()!=target:continue
+            seen+=1
+            if seen!=occurrence:continue
+            matches=list(COORD_RE.finditer(value))
+            if not 0<=after_index<len(matches):raise IndexError("Segment index is outside the Data line")
+            end=matches[after_index].end();coordinate=f"({latitude:f},{longitude:f})"
+            self.lines[line_index].text=f"{key}={value[:end]},{coordinate}{value[end:]}";return
+        raise KeyError(f"Data{data_level} occurrence {occurrence} is not present")
+
+    def delete_node(self, data_level: int, occurrence: int, node_index: int) -> None:
+        target=f"data{data_level}";seen=-1
+        for key,value,line_index in self.pairs():
+            if key.strip().lower()!=target:continue
+            seen+=1
+            if seen!=occurrence:continue
+            matches=list(COORD_RE.finditer(value))
+            if not 0<=node_index<len(matches):raise IndexError("Node index is outside the Data line")
+            if len(matches)<=1:raise ValueError("Geometry element cannot be empty")
+            closed=(self.name.upper() in {"POLYGON","RGN80"} and len(matches)>=2 and matches[0].group(0)==matches[-1].group(0))
+            if closed:
+                values=[match.group(0) for match in matches[:-1]];target=0 if node_index==len(matches)-1 else node_index
+                del values[target]
+                if not values:raise ValueError("Geometry element cannot be empty")
+                values.append(values[0]);new_value=",".join(values)
+            elif node_index==0:new_value=value[matches[1].start():]
+            else:new_value=value[:matches[node_index-1].end()]+value[matches[node_index].end():]
+            self.lines[line_index].text=f"{key}={new_value}";return
+        raise KeyError(f"Data{data_level} occurrence {occurrence} is not present")
 
     @property
     def is_object(self) -> bool:

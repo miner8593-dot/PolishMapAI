@@ -76,6 +76,7 @@ class Editor(tk.Tk):
         self.loading_cancel = threading.Event(); self.worker_queue: queue.Queue = queue.Queue()
         self.render_after = None; self.wheel_after = None; self.resize_after = None
         self.render_generation = 0; self.render_state = None; self.drag_node = None
+        self.active_node = None
         self.last_render_stats = {}
         self.render_reason = "viewport"; self.first_frame_pending = False
         self.context_coordinate = (0.0, 0.0)
@@ -185,7 +186,7 @@ class Editor(tk.Tk):
         ttk.Label(statusbar,textvariable=self.scale_text,relief="sunken",anchor="center",width=10,padding=(4,2)).pack(side="left")
 
     def _bind_keys(self):
-        bindings = {"<Control-n>": self.new_file, "<Control-o>": self.open_file, "<Control-s>": self.save_file, "<Control-Shift-S>": self.save_as, "<Control-z>": self.undo, "<Control-y>": self.redo, "<Control-x>": self.cut, "<Control-c>": self.copy, "<Control-v>": self.paste, "<Control-a>": self.select_all, "<Control-f>": self.find_object, "<Control-g>": self.goto_coordinates, "<Alt-Return>": self.show_object_properties, "<Delete>": self.delete_selected, "<Home>": self.zoom_all, "<F5>": self.render_viewport, "<Escape>": self.cancel_interaction}
+        bindings = {"<Control-n>": self.new_file, "<Control-o>": self.open_file, "<Control-s>": self.save_file, "<Control-Shift-S>": self.save_as, "<Control-z>": self.undo, "<Control-y>": self.redo, "<Control-x>": self.cut, "<Control-c>": self.copy, "<Control-v>": self.paste, "<Control-a>": self.select_all, "<Control-f>": self.find_object, "<Control-g>": self.goto_coordinates, "<Alt-Return>": self.show_object_properties, "<Delete>": self.delete_action, "<Home>": self.zoom_all, "<F5>": self.render_viewport, "<Escape>": self.cancel_interaction}
         for key, command in bindings.items(): self.bind(key, lambda e, c=command: c())
 
     # ----- loading/indexing -----------------------------------------
@@ -363,7 +364,8 @@ class Editor(tk.Tk):
                 if data_level != active: continue
                 for node_index, (lat, lon) in enumerate(coords):
                     x, y = self.world_to_screen(lat, lon)
-                    self.canvas.create_rectangle(x-3, y-3, x+3, y+3, fill="#ffffff", outline="#1769aa", tags=("overlay", f"node-{data_level}-{occurrence}-{node_index}"))
+                    node=(data_level,occurrence,node_index)
+                    self.canvas.create_rectangle(x-4, y-4, x+4, y+4, fill="#ffd36a" if node==self.active_node else "#ffffff", outline="#1769aa", tags=("overlay", f"node-{data_level}-{occurrence}-{node_index}"))
 
     def _cancel_active_render(self):
         self.render_generation += 1; self.render_state = None
@@ -437,7 +439,9 @@ class Editor(tk.Tk):
             return
         if self.mode == "nodes":
             node = self._hit_node(event.x, event.y)
+            self.active_node=node
             self.drag_kind = "node" if node else None; self.drag_node = node
+            self.render_viewport()
             return
         hit=self.hit_test(event.x,event.y)
         if hit:
@@ -532,6 +536,10 @@ class Editor(tk.Tk):
             hit=self.hit_test(event.x,event.y)
             if hit:
                 self.selected=[hit];self.refresh_properties();self.show_object_properties()
+        elif self.mode=="nodes":
+            segment=self._hit_segment(event.x,event.y)
+            if segment:
+                data_level,occurrence,after_index=segment;lat,lon=self.screen_to_world(event.x,event.y);self.push_undo();self.selected[0].insert_node(data_level,occurrence,after_index,Decimal(str(lat)),Decimal(str(lon)));self.doc.dirty=True;self.active_node=(data_level,occurrence,after_index+1);self.rebuild_index();self.render_viewport()
 
     def on_motion(self,event):
         self.last_cursor_coordinate=self.screen_to_world(event.x,event.y)
@@ -551,12 +559,29 @@ class Editor(tk.Tk):
                 if math.hypot(px-x,py-y)<=8:return data_level,occurrence,node_index
         return None
 
+    def _hit_segment(self,x,y):
+        if len(self.selected)!=1:return None
+        active=self._active_data_level(self.selected[0]);best=(9,None)
+        for data_level,occurrence,coords in self.selected[0].coordinate_elements():
+            if data_level!=active:continue
+            points=[self.world_to_screen(lat,lon) for lat,lon in coords]
+            for index,(a,b) in enumerate(zip(points,points[1:])):
+                distance=self._segment_distance(x,y,*a,*b)
+                if distance<best[0]:best=(distance,(data_level,occurrence,index))
+        return best[1]
+
     # ----- context/location -----------------------------------------
     def on_context(self,event):
         self.context_coordinate=self.screen_to_world(event.x,event.y)
+        node=self._hit_node(event.x,event.y) if self.mode=="nodes" else None
+        if node:self.active_node=node
         hit=self.hit_test(event.x,event.y) if self.mode in {"select","nodes"} else None
         menu=tk.Menu(self,tearoff=False)
-        if hit:
+        if node:
+            menu.add_command(label="Удалить узел",command=self.delete_active_node,accelerator="Del")
+            menu.add_command(label="Свойства объекта…",command=self.show_object_properties,accelerator="Alt+Enter")
+            menu.add_separator()
+        if hit and not node:
             if hit not in self.selected:self.selected=[hit];self.refresh_properties();self.render_viewport()
             menu.add_command(label="Свойства…",command=self.show_object_properties,accelerator="Alt+Enter")
             modify=tk.Menu(menu,tearoff=False)
@@ -629,6 +654,15 @@ class Editor(tk.Tk):
         self.push_undo()
         for obj in list(self.selected):self.doc.delete(obj)
         self.selected=[];self.rebuild_index();self.refresh_properties();self.render_viewport()
+    def delete_action(self):
+        if self.mode=="nodes" and self.active_node:self.delete_active_node()
+        else:self.delete_selected()
+    def delete_active_node(self):
+        if len(self.selected)!=1 or not self.active_node:return
+        data_level,occurrence,node_index=self.active_node;minimum=4 if object_kind(self.selected[0].name)=="polygon" else 2
+        coords=next((c for level,occ,c in self.selected[0].coordinate_elements() if level==data_level and occ==occurrence),[])
+        if len(coords)<=minimum:messagebox.showwarning("Удаление узла",f"Для этого объекта необходимо не менее {minimum} узлов");return
+        self.push_undo();self.selected[0].delete_node(data_level,occurrence,node_index);self.doc.dirty=True;self.active_node=None;self.rebuild_index();self.render_viewport()
     def select_all(self,kind=None):
         def matches(obj):
             name=obj.name.upper()
@@ -643,7 +677,7 @@ class Editor(tk.Tk):
         chosen=set(id(x) for x in self.selected);self.selected=[x.section for x in self.index.items if id(x.section) not in chosen];self.refresh_properties();self.render_viewport()
     def rebuild_index(self):self.index.build(self.doc.objects())
     def set_mode(self,mode):
-        self.mode=mode;self.pending=[];self.canvas.configure(cursor="hand2" if mode=="pan" else "crosshair" if mode in {"POI","POLYLINE","POLYGON"} else "arrow")
+        self.mode=mode;self.pending=[];self.active_node=None;self.canvas.configure(cursor="hand2" if mode=="pan" else "crosshair" if mode in {"POI","POLYLINE","POLYGON"} else "arrow")
         if mode in self.creation_types:
             code=self.creation_types[mode];self.type_button.configure(text=f"Тип: 0x{code:X} — {type_name(mode, hex(code))}")
         else:self.type_button.configure(text="Тип: —")

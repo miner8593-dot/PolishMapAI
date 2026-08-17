@@ -85,3 +85,22 @@ def test_repeated_data_lines_are_separate_elements_and_edit_locally():
     obj.move_node(0, 1, 30, 40, occurrence=1)
     assert obj.geometries(0)[0] == [(1, 1), (2, 2)]
     assert obj.geometries(0)[1] == [(10, 10), (30, 40)]
+
+
+def test_insert_and_delete_node_are_element_local():
+    source = (b"[POLYLINE]\r\nData0=(1,1),(2,2)\r\n"
+              b"Data0=(10,10),(20,20)\r\n[END]\r\n")
+    obj = MpDocument.from_bytes(source).objects()[0]
+    obj.insert_node(0,1,0,15,15)
+    assert obj.geometries(0)[1] == [(10,10),(15,15),(20,20)]
+    obj.delete_node(0,1,1)
+    assert obj.geometries(0)[1] == [(10,10),(20,20)]
+
+
+def test_polygon_endpoint_move_and_delete_keep_ring_closed():
+    source=b"[POLYGON]\r\nData0=(1,1),(1,2),(2,2),(2,1),(1,1)\r\n[END]\r\n"
+    obj=MpDocument.from_bytes(source).objects()[0]
+    obj.move_node(0,0,3,3)
+    assert obj.geometries(0)[0][0]==obj.geometries(0)[0][-1]==(3,3)
+    obj.delete_node(0,0,0)
+    assert obj.geometries(0)[0][0]==obj.geometries(0)[0][-1]
