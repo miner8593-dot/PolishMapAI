@@ -53,6 +53,14 @@ class MpSection:
                 return
         self.lines.append(MpLine(f"{key}={value}", newline))
 
+    def remove(self, key: str) -> None:
+        self.lines=[line for line in self.lines if not (PAIR_RE.match(line.text) and PAIR_RE.match(line.text).group(1).strip().lower()==key.lower())]
+
+    def replace_numbered(self, prefix: str, values: list[str], newline: str = "\r\n") -> None:
+        pattern=re.compile(rf"^{re.escape(prefix)}\d+$",re.IGNORECASE)
+        self.lines=[line for line in self.lines if not (PAIR_RE.match(line.text) and pattern.match(PAIR_RE.match(line.text).group(1).strip()))]
+        self.lines.extend(MpLine(f"{prefix}{number}={value}",newline) for number,value in enumerate(values,1))
+
     def coordinate_groups(self) -> list[tuple[int, list[tuple[Decimal, Decimal]]]]:
         """Return each DataN geometry without joining alternative levels."""
         groups: list[tuple[int, list[tuple[Decimal, Decimal]]]] = []
@@ -205,6 +213,8 @@ class MpSection:
         """
         if self.name.upper() not in {"POLYLINE", "RGN40"}:
             raise ValueError("Only polylines can be split")
+        if self.get("RoadID") or self.get("RouteParam") or any(NOD_KEY_RE.match(key.strip()) for key,_,_ in self.pairs()):
+            raise ValueError("Remove or rebuild Navitel routing fields before splitting this road")
         elements = self.coordinate_elements()
         if len(elements) != 1:
             raise ValueError("Split currently requires a polyline with one DataN element")
@@ -223,6 +233,8 @@ class MpSection:
         """Join two simple polylines by their nearest endpoints."""
         if self.name.upper() not in {"POLYLINE", "RGN40"} or other.name.upper() not in {"POLYLINE", "RGN40"}:
             raise ValueError("Only polylines can be joined")
+        if any(obj.get("RoadID") or obj.get("RouteParam") or any(NOD_KEY_RE.match(key.strip()) for key,_,_ in obj.pairs()) for obj in (self,other)):
+            raise ValueError("Remove or rebuild Navitel routing fields before joining these roads")
         left, right = self.coordinate_elements(), other.coordinate_elements()
         if len(left) != 1 or len(right) != 1:
             raise ValueError("Join currently requires one DataN element in each polyline")
@@ -431,8 +443,10 @@ def geometry_issues(doc: MpDocument) -> list[str]:
             else:
                 if len(numbers) < 12:
                     issues.append(f"Object {index}: RouteParam needs 12 values for Navitel routing")
-                if numbers and not 0 <= numbers[0] <= 8:
-                    issues.append(f"Object {index}: RouteParam road class is outside 0..8")
+                if numbers and not 0 <= numbers[0] <= 7:
+                    issues.append(f"Object {index}: RouteParam speed class is outside 0..7")
+                if len(numbers)>1 and not 0 <= numbers[1] <= 7:
+                    issues.append(f"Object {index}: RouteParam road class is outside 0..7")
         primary = next((points for level, points in groups if level == 0), groups[0][1] if groups else [])
         for key, value, _ in obj.pairs():
             if not NOD_KEY_RE.match(key.strip()):

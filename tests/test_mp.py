@@ -31,11 +31,11 @@ def test_ensure_navitel_header_for_new_map():
 
 def test_split_and_join_simple_polyline_preserves_properties():
     document=MpDocument([],[])
-    line=document.add_object("POLYLINE",[(1,1),(2,2),(3,3),(4,4)],Type="0x06",Label="Road",RouteParam="3,1,0,0,0,0,0,0,0,0,0,0")
+    line=document.add_object("POLYLINE",[(1,1),(2,2),(3,3),(4,4)],Type="0x06",Label="Road",StreetDesc="Main")
     second=line.split_polyline(0,0,2)
     assert line.coordinates()==[(Decimal("1.00000000"),Decimal("1.00000000")),(Decimal("2.00000000"),Decimal("2.00000000")),(Decimal("3.00000000"),Decimal("3.00000000"))]
     assert second.coordinates()[0]==(Decimal("3.00000000"),Decimal("3.00000000"))
-    assert second.get("RouteParam")==line.get("RouteParam")
+    assert second.get("StreetDesc")==line.get("StreetDesc")
     line.merge_polyline(second)
     assert len(line.coordinates())==4
 
@@ -56,6 +56,12 @@ def test_navitel_routing_validation_checks_graph_fields():
     assert any("non-integer" in issue for issue in issues)
     assert any("outside Data0" in issue for issue in issues)
     assert any("duplicates" in issue for issue in issues)
+
+
+def test_replace_numbered_routing_nodes_preserves_other_fields():
+    document=MpDocument.from_bytes(b"[POLYLINE]\r\nRoadID=7\r\nNod1=0,10,1\r\nComment=keep\r\nNod2=1,11,0\r\nData0=(1,1),(2,2)\r\n[END]\r\n")
+    road=document.objects()[0];road.replace_numbered("Nod",["0,20,1","1,21,0"],document.newline)
+    assert road.get("Comment")=="keep" and road.get("Nod1")=="0,20,1" and road.get("Nod2")=="1,21,0"
 
 
 def test_unknown_fields_comments_order_and_precision_survive_edit():

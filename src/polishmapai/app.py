@@ -158,6 +158,7 @@ class Editor(tk.Tk):
         tools.add_separator(); self._cmd(tools, "Выбрать тип создаваемого объекта…", self.choose_creation_type)
         self._cmd(tools, "Разделить полилинию в выбранном узле", self.split_selected_polyline)
         self._cmd(tools, "Соединить две полилинии", self.merge_selected_polylines)
+        self._cmd(tools, "Параметры маршрутизации дороги…", self.show_routing_properties)
         self._cmd(tools, "Проверить геометрию…", self.check_geometry)
         neural = tk.Menu(bar, tearoff=False); self._cmd(neural, "Открыть настройки нейросети…", self.neural_info)
         help_menu = tk.Menu(bar, tearoff=False); self._cmd(help_menu, "О программе", lambda: messagebox.showinfo("О программе", "PolishMapAI\nРедактор карт Polish MP для набора типов Navitel (NG).\nНезависимая clean-room реализация."))
@@ -634,6 +635,7 @@ class Editor(tk.Tk):
             modify.add_command(label="Изменить тип…",command=self.change_selected_type)
             modify.add_command(label="Редактировать узлы",command=lambda:self.set_mode("nodes"))
             modify.add_command(label="Обратить порядок точек",command=self.reverse_selected)
+            modify.add_command(label="Параметры маршрутизации…",command=self.show_routing_properties)
             menu.add_cascade(label="Изменить",menu=modify)
             menu.add_separator();menu.add_command(label="Вырезать",command=self.cut,accelerator="Ctrl+X");menu.add_command(label="Копировать",command=self.copy,accelerator="Ctrl+C");menu.add_command(label="Удалить",command=self.delete_selected,accelerator="Del")
             menu.add_separator()
@@ -729,6 +731,46 @@ class Editor(tk.Tk):
             if self.undo_stack:self.undo_stack.pop()
             messagebox.showwarning("Соединить полилинии",str(exc));return
         self.selected=[first];self.rebuild_index();self.refresh_properties();self.render_viewport();self.status.set("Полилинии соединены")
+    def show_routing_properties(self):
+        if len(self.selected)!=1 or object_kind(self.selected[0].name)!="line":
+            messagebox.showinfo("Маршрутизация","Выберите одну полилинию дороги");return
+        obj=self.selected[0];parts=obj.get("RouteParam").split(",") if obj.get("RouteParam") else []
+        numbers=[]
+        for index in range(12):
+            try:numbers.append(int(parts[index]))
+            except (IndexError,ValueError):numbers.append(0)
+        win=tk.Toplevel(self);win.title("Параметры маршрутизации дороги");win.transient(self);win.grab_set();win.geometry("620x520")
+        top=ttk.LabelFrame(win,text="RouteParam (Navitel)",padding=10);top.pack(fill="x",padx=8,pady=8)
+        road_id=tk.StringVar(value=obj.get("RoadID"));speed=tk.IntVar(value=numbers[0]);frc=tk.IntVar(value=numbers[1])
+        ttk.Label(top,text="RoadID:").grid(row=0,column=0,sticky="e",padx=4,pady=3);ttk.Entry(top,textvariable=road_id,width=18).grid(row=0,column=1,sticky="w")
+        ttk.Label(top,text="Класс скорости:").grid(row=0,column=2,sticky="e",padx=4);ttk.Combobox(top,textvariable=speed,values=tuple(range(8)),state="readonly",width=5).grid(row=0,column=3,sticky="w")
+        ttk.Label(top,text="Класс дороги (FRC):").grid(row=1,column=0,sticky="e",padx=4,pady=3);ttk.Combobox(top,textvariable=frc,values=tuple(range(8)),state="readonly",width=5).grid(row=1,column=1,sticky="w")
+        flag_names=("Односторонняя","Платная","Экстренные службы запрещены","Доставка запрещена","Автомобили запрещены","Автобусы запрещены","Такси запрещены","Пешеходы запрещены","Велосипеды запрещены","Грузовики запрещены")
+        flags=[tk.BooleanVar(value=bool(numbers[index+2])) for index in range(10)]
+        for index,(name,var) in enumerate(zip(flag_names,flags)):ttk.Checkbutton(top,text=name,variable=var).grid(row=2+index//2,column=(index%2)*2,columnspan=2,sticky="w",padx=8,pady=1)
+        nodes=ttk.LabelFrame(win,text="Узлы дорожного графа NodN",padding=8);nodes.pack(fill="both",expand=True,padx=8,pady=(0,8))
+        tree=ttk.Treeview(nodes,columns=("index","id","boundary"),show="headings",height=8);tree.heading("index",text="Индекс точки");tree.heading("id",text="NodeID");tree.heading("boundary",text="Граничный");tree.pack(fill="both",expand=True)
+        for key,value,_ in obj.pairs():
+            if key.strip().lower().startswith("nod") and key.strip()[3:].isdigit():
+                fields=(value.split(",")+["",""])[:3];tree.insert("","end",values=fields)
+        buttons=ttk.Frame(nodes);buttons.pack(fill="x",pady=(6,0))
+        def add_node():
+            default=self.active_node[2] if self.active_node else 0
+            node_index=simpledialog.askinteger("Узел дороги","Индекс точки Data0:",initialvalue=default,minvalue=0,parent=win)
+            if node_index is None:return
+            node_id=simpledialog.askinteger("Узел дороги","NodeID:",minvalue=1,parent=win)
+            if node_id is not None:tree.insert("","end",values=(node_index,node_id,0))
+        def delete_node():
+            for iid in tree.selection():tree.delete(iid)
+        ttk.Button(buttons,text="Добавить…",command=add_node).pack(side="left");ttk.Button(buttons,text="Удалить",command=delete_node).pack(side="left",padx=4)
+        footer=ttk.Frame(win,padding=(8,0,8,8));footer.pack(fill="x")
+        def apply():
+            self.push_undo();value=[speed.get(),frc.get(),*(1 if var.get() else 0 for var in flags)];obj.set("RouteParam",",".join(map(str,value)),self.doc.newline)
+            if road_id.get().strip():obj.set("RoadID",road_id.get().strip(),self.doc.newline)
+            else:obj.remove("RoadID")
+            node_values=[",".join(map(str,tree.item(iid,"values"))) for iid in tree.get_children()];obj.replace_numbered("Nod",node_values,self.doc.newline)
+            self.doc.dirty=True;self.rebuild_index();self.refresh_properties();self.render_viewport();self.status.set("Параметры маршрутизации изменены");win.destroy()
+        ttk.Button(footer,text="ОК",command=apply).pack(side="right",padx=4);ttk.Button(footer,text="Отмена",command=win.destroy).pack(side="right")
     def select_all(self,kind=None):
         def matches(obj):
             name=obj.name.upper()
