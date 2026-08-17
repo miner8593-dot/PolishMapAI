@@ -58,6 +58,8 @@ class Editor(tk.Tk):
         self.title("PolishMapAI — Без имени")
         self.geometry("1280x800"); self.minsize(900, 560)
         self.doc = MpDocument([], [])
+        self.doc.ensure_header().set("TypeSet", "NG", self.doc.newline)
+        self.doc.dirty = False
         self.index = SpatialIndex()
         self.selected: list[MpSection] = []
         self.mode = "select"
@@ -145,6 +147,8 @@ class Editor(tk.Tk):
         tools = tk.Menu(bar, tearoff=False)
         for label, mode in [("Выбор объектов", "select"), ("Редактировать узлы", "nodes"), ("Перемещать карту", "pan"), ("Создать точку (POI)", "POI"), ("Создать полилинию", "POLYLINE"), ("Создать полигон", "POLYGON")]: self._cmd(tools, label, lambda m=mode: self.set_mode(m))
         tools.add_separator(); self._cmd(tools, "Выбрать тип создаваемого объекта…", self.choose_creation_type)
+        self._cmd(tools, "Разделить полилинию в выбранном узле", self.split_selected_polyline)
+        self._cmd(tools, "Соединить две полилинии", self.merge_selected_polylines)
         self._cmd(tools, "Проверить геометрию…", self.check_geometry)
         neural = tk.Menu(bar, tearoff=False); self._cmd(neural, "Открыть настройки нейросети…", self.neural_info)
         help_menu = tk.Menu(bar, tearoff=False); self._cmd(help_menu, "О программе", lambda: messagebox.showinfo("О программе", "PolishMapAI\nРедактор карт Polish MP для набора типов Navitel (NG).\nНезависимая clean-room реализация."))
@@ -579,6 +583,7 @@ class Editor(tk.Tk):
         menu=tk.Menu(self,tearoff=False)
         if node:
             menu.add_command(label="Удалить узел",command=self.delete_active_node,accelerator="Del")
+            menu.add_command(label="Разделить полилинию в узле",command=self.split_selected_polyline)
             menu.add_command(label="Свойства объекта…",command=self.show_object_properties,accelerator="Alt+Enter")
             menu.add_separator()
         if hit and not node:
@@ -608,7 +613,7 @@ class Editor(tk.Tk):
     # ----- document/editing ----------------------------------------
     def new_file(self):
         if not self._can_discard_changes():return
-        self.doc=MpDocument([],[]);self.index.clear();self.selected=[];self.title("PolishMapAI — Без имени");self.render_viewport();self._update_commands()
+        self.doc=MpDocument([],[]);self.doc.ensure_header().set("TypeSet","NG",self.doc.newline);self.doc.dirty=False;self.index.clear();self.selected=[];self.title("PolishMapAI — Без имени");self.render_viewport();self._update_commands()
     def close_file(self):self.new_file()
     def save_file(self):
         if self.doc.path is None:return self.save_as()
@@ -663,6 +668,26 @@ class Editor(tk.Tk):
         coords=next((c for level,occ,c in self.selected[0].coordinate_elements() if level==data_level and occ==occurrence),[])
         if len(coords)<=minimum:messagebox.showwarning("Удаление узла",f"Для этого объекта необходимо не менее {minimum} узлов");return
         self.push_undo();self.selected[0].delete_node(data_level,occurrence,node_index);self.doc.dirty=True;self.active_node=None;self.rebuild_index();self.render_viewport()
+    def split_selected_polyline(self):
+        if len(self.selected)!=1 or not self.active_node:
+            messagebox.showinfo("Разделить полилинию","Выберите внутренний узел одной полилинии в режиме редактирования узлов");return
+        obj=self.selected[0]
+        try:
+            self.push_undo();second=obj.split_polyline(*self.active_node);position=self.doc.sections.index(obj)+1;self.doc.sections.insert(position,second);self.doc.dirty=True
+        except ValueError as exc:
+            if self.undo_stack:self.undo_stack.pop()
+            messagebox.showwarning("Разделить полилинию",str(exc));return
+        self.selected=[second];self.active_node=None;self.rebuild_index();self.refresh_properties();self.render_viewport();self.status.set("Полилиния разделена")
+    def merge_selected_polylines(self):
+        if len(self.selected)!=2:
+            messagebox.showinfo("Соединить полилинии","Выберите ровно две полилинии");return
+        first,second=self.selected
+        try:
+            self.push_undo();first.merge_polyline(second);self.doc.delete(second);self.doc.dirty=True
+        except ValueError as exc:
+            if self.undo_stack:self.undo_stack.pop()
+            messagebox.showwarning("Соединить полилинии",str(exc));return
+        self.selected=[first];self.rebuild_index();self.refresh_properties();self.render_viewport();self.status.set("Полилинии соединены")
     def select_all(self,kind=None):
         def matches(obj):
             name=obj.name.upper()
@@ -795,7 +820,31 @@ class Editor(tk.Tk):
             if q in obj.get("Label").lower() or q in obj.render().lower():found.append(obj);seen.add(id(obj))
         if not found:messagebox.showinfo("Найти","Совпадений нет");return
         self.selected=found[:100];bbox=section_bbox(found[0]);self.center=[(bbox[1]+bbox[3])/2,(bbox[0]+bbox[2])/2];self.refresh_properties();self.render_viewport();self.status.set(f"Найдено: {len(found)}")
-    def map_properties(self):messagebox.showinfo("Свойства карты",f"Файл: {self.doc.path or 'Без имени'}\nОбъектов: {len(self.index.items):,}\nКодировка: Windows-1251\nИзменена: {'да' if self.doc.dirty else 'нет'}")
+    def map_properties(self):
+        header=self.doc.ensure_header();win=tk.Toplevel(self);win.title("Свойства карты");win.transient(self);win.grab_set();win.geometry("620x480")
+        book=ttk.Notebook(win);book.pack(fill="both",expand=True,padx=8,pady=8)
+        common=ttk.Frame(book,padding=12);levels=ttk.Frame(book,padding=12);source=ttk.Frame(book,padding=8);navitel=ttk.Frame(book,padding=12)
+        book.add(common,text="Общие");book.add(levels,text="Уровни");book.add(navitel,text="Navitel");book.add(source,text="Исходный заголовок")
+        fields={}
+        definitions=[("Name","Название карты"),("ID","Идентификатор"),("Copyright","Copyright"),("CodePage","Кодовая страница"),("Elevation","Единицы высоты")]
+        for row,(key,label) in enumerate(definitions):
+            ttk.Label(common,text=label+":").grid(row=row,column=0,sticky="e",padx=(0,8),pady=4);var=tk.StringVar(value=header.get(key));ttk.Entry(common,textvariable=var,width=48).grid(row=row,column=1,sticky="ew",pady=4);fields[key]=var
+        common.columnconfigure(1,weight=1)
+        ttk.Label(common,text=f"Файл: {self.doc.path or 'Без имени'}\nОбъектов: {len(self.index.items):,}\nКодировка чтения: Windows-1251",justify="left").grid(row=len(definitions),column=0,columnspan=2,sticky="w",pady=(16,0))
+        ttk.Label(navitel,text="Набор типов:").grid(row=0,column=0,sticky="e",padx=(0,8),pady=4);type_var=tk.StringVar(value=header.get("TypeSet") or "NG");ttk.Entry(navitel,textvariable=type_var,state="readonly",width=27).grid(row=0,column=1,sticky="w",pady=4);fields["TypeSet"]=type_var
+        ttk.Label(navitel,text="Для карт Навител должен быть выбран TypeSet=NG.\nОн включает навителовские коды зданий, растительности, POI\nи атрибуты дорожного графа.",justify="left").grid(row=1,column=0,columnspan=2,sticky="w",pady=(14,0))
+        level_tree=ttk.Treeview(levels,columns=("level","zoom"),show="headings",height=12);level_tree.heading("level",text="LevelN (битность)");level_tree.heading("zoom",text="ZoomN / DataN");level_tree.pack(fill="both",expand=True)
+        for number in range(10):
+            level_value=header.get(f"Level{number}");zoom_value=header.get(f"Zoom{number}")
+            if level_value or zoom_value:level_tree.insert("","end",values=(level_value,zoom_value))
+        raw=tk.Text(source,wrap="none",font=("Consolas",9));raw.pack(fill="both",expand=True);raw.insert("1.0","\n".join(f"{key}={value}" for key,value,_ in header.pairs()));raw.configure(state="disabled")
+        footer=ttk.Frame(win,padding=(8,0,8,8));footer.pack(fill="x")
+        def apply(close=False):
+            self.push_undo()
+            for key,var in fields.items():header.set(key,var.get(),self.doc.newline)
+            self.doc.dirty=True;self.status.set("Свойства карты изменены");self._update_commands()
+            if close:win.destroy()
+        ttk.Button(footer,text="ОК",command=lambda:apply(True)).pack(side="right",padx=4);ttk.Button(footer,text="Отмена",command=win.destroy).pack(side="right");ttk.Button(footer,text="Применить",command=apply).pack(side="right",padx=4)
     def show_log(self):messagebox.showinfo("Журнал сообщений","\n".join(self.metrics[-100:]) or "Журнал пуст")
     def check_geometry(self):
         issues=geometry_issues(self.doc);messagebox.showinfo("Проверка геометрии","Ошибок нет" if not issues else "\n".join(issues[:100]))
@@ -858,7 +907,7 @@ class Editor(tk.Tk):
         current=(f"{self.navitel_skin.name} — NS2 v{self.navitel_skin.version}" if self.navitel_skin else "Navitel (стандартное оформление NG)")
         ttk.Label(frame,text=f"{current}\nАктивно").grid(row=1,column=1,sticky="w")
         ttk.Separator(frame).grid(row=2,column=0,columnspan=2,sticky="ew",pady=10)
-        ttk.Label(frame,text="Поддерживаются картографические таблицы day.skin/night.skin\nиз архивов Navitel NS2. Garmin TYP к TypeSet=NG не относится.",justify="left").grid(row=3,column=0,columnspan=2,sticky="w")
+        ttk.Label(frame,text="Файл оформления Навител — архив *.NS2 с таблицами\nday.skin/night.skin (навителовский аналог файла TYP).",justify="left").grid(row=3,column=0,columnspan=2,sticky="w")
         buttons=ttk.Frame(frame);buttons.grid(row=4,column=0,columnspan=2,sticky="ew",pady=(12,0))
         def load(night=False):
             path=filedialog.askopenfilename(parent=win,title="Открыть оформление Navitel NS2",filetypes=[("Navitel skin","*.ns2"),("Все файлы","*.*")])

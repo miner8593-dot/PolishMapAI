@@ -1,3 +1,5 @@
+from decimal import Decimal
+
 from polishmapai.mp import MpDocument, geometry_issues
 
 
@@ -19,6 +21,41 @@ def test_map_header_and_navitel_type_set():
     document = MpDocument.from_bytes(SAMPLE.replace(b"UnknownHeader=keep me", b"TypeSet=NG"))
     assert document.header is not None
     assert document.type_set == "NG"
+
+
+def test_ensure_navitel_header_for_new_map():
+    document=MpDocument([],[])
+    header=document.ensure_header();header.set("TypeSet","NG",document.newline)
+    assert document.header is header and document.type_set=="NG" and document.dirty
+
+
+def test_split_and_join_simple_polyline_preserves_properties():
+    document=MpDocument([],[])
+    line=document.add_object("POLYLINE",[(1,1),(2,2),(3,3),(4,4)],Type="0x06",Label="Road",RouteParam="3,1,0,0,0,0,0,0,0,0,0,0")
+    second=line.split_polyline(0,0,2)
+    assert line.coordinates()==[(Decimal("1.00000000"),Decimal("1.00000000")),(Decimal("2.00000000"),Decimal("2.00000000")),(Decimal("3.00000000"),Decimal("3.00000000"))]
+    assert second.coordinates()[0]==(Decimal("3.00000000"),Decimal("3.00000000"))
+    assert second.get("RouteParam")==line.get("RouteParam")
+    line.merge_polyline(second)
+    assert len(line.coordinates())==4
+
+
+def test_merge_reverses_nearest_endpoints():
+    document=MpDocument([],[])
+    left=document.add_object("POLYLINE",[(0,0),(1,1)])
+    right=document.add_object("POLYLINE",[(3,3),(2,2)])
+    left.merge_polyline(right)
+    assert left.coordinates()==[(Decimal("0.00000000"),Decimal("0.00000000")),(Decimal("1.00000000"),Decimal("1.00000000")),(Decimal("2.00000000"),Decimal("2.00000000")),(Decimal("3.00000000"),Decimal("3.00000000"))]
+
+
+def test_navitel_routing_validation_checks_graph_fields():
+    document=MpDocument([],[])
+    document.add_object("POLYLINE",[(1,1),(2,2)],RoadID="10",RouteParam="9,bad",Nod1="4,123,1")
+    document.add_object("POLYLINE",[(3,3),(4,4)],RoadID="10")
+    issues=geometry_issues(document)
+    assert any("non-integer" in issue for issue in issues)
+    assert any("outside Data0" in issue for issue in issues)
+    assert any("duplicates" in issue for issue in issues)
 
 
 def test_unknown_fields_comments_order_and_precision_survive_edit():

@@ -11,6 +11,7 @@ SECTION_RE = re.compile(r"^\s*\[([^]]+)]\s*$")
 PAIR_RE = re.compile(r"^([^=]+)=(.*)$")
 COORD_RE = re.compile(r"\(\s*([-+]?\d+(?:\.\d+)?)\s*,\s*([-+]?\d+(?:\.\d+)?)\s*\)")
 DATA_KEY_RE = re.compile(r"^data(\d+)$", re.IGNORECASE)
+NOD_KEY_RE = re.compile(r"^nod\d+$", re.IGNORECASE)
 OBJECT_SECTIONS = {"POI", "POLYLINE", "POLYGON", "RGN10", "RGN20", "RGN40", "RGN80"}
 
 
@@ -195,6 +196,70 @@ class MpSection:
             self.lines[line_index].text=f"{key}={new_value}";return
         raise KeyError(f"Data{data_level} occurrence {occurrence} is not present")
 
+    def split_polyline(self, data_level: int, occurrence: int, node_index: int) -> "MpSection":
+        """Split a simple polyline at an existing interior node.
+
+        The operation intentionally requires one geometry element.  This keeps
+        alternate DataN representations lossless instead of silently producing
+        overlapping objects with ambiguous detail levels.
+        """
+        if self.name.upper() not in {"POLYLINE", "RGN40"}:
+            raise ValueError("Only polylines can be split")
+        elements = self.coordinate_elements()
+        if len(elements) != 1:
+            raise ValueError("Split currently requires a polyline with one DataN element")
+        level, element_occurrence, coords = elements[0]
+        if (level, element_occurrence) != (data_level, occurrence):
+            raise ValueError("The selected node is not in the editable geometry element")
+        if not 0 < node_index < len(coords) - 1:
+            raise ValueError("Select an interior node to split the polyline")
+
+        second = copy.deepcopy(self)
+        self._set_coordinate_element(data_level, occurrence, coords[:node_index + 1])
+        second._set_coordinate_element(data_level, occurrence, coords[node_index:])
+        return second
+
+    def merge_polyline(self, other: "MpSection") -> None:
+        """Join two simple polylines by their nearest endpoints."""
+        if self.name.upper() not in {"POLYLINE", "RGN40"} or other.name.upper() not in {"POLYLINE", "RGN40"}:
+            raise ValueError("Only polylines can be joined")
+        left, right = self.coordinate_elements(), other.coordinate_elements()
+        if len(left) != 1 or len(right) != 1:
+            raise ValueError("Join currently requires one DataN element in each polyline")
+        level, occurrence, first = left[0]
+        other_level, _, second = right[0]
+        if level != other_level:
+            raise ValueError("Polylines must use the same DataN level")
+
+        variants = (
+            (first, second),
+            (first, list(reversed(second))),
+            (list(reversed(first)), second),
+            (list(reversed(first)), list(reversed(second))),
+        )
+        first, second = min(
+            variants,
+            key=lambda pair: (pair[0][-1][0] - pair[1][0][0]) ** 2 + (pair[0][-1][1] - pair[1][0][1]) ** 2,
+        )
+        joined = first + (second[1:] if first[-1] == second[0] else second)
+        self._set_coordinate_element(level, occurrence, joined)
+
+    def _set_coordinate_element(
+        self, data_level: int, occurrence: int,
+        coordinates: list[tuple[Decimal, Decimal]],
+    ) -> None:
+        target = f"data{data_level}"
+        seen = -1
+        for key, _, line_index in self.pairs():
+            if key.strip().lower() != target:
+                continue
+            seen += 1
+            if seen == occurrence:
+                value = ",".join(f"({lat:f},{lon:f})" for lat, lon in coordinates)
+                self.lines[line_index].text = f"{key}={value}"
+                return
+        raise KeyError(f"Data{data_level} occurrence {occurrence} is not present")
+
     @property
     def is_object(self) -> bool:
         return self.name.upper() in OBJECT_SECTIONS or bool(self.coordinates())
@@ -301,6 +366,14 @@ class MpDocument:
     def type_set(self) -> str:
         return self.header.get("TypeSet") if self.header else ""
 
+    def ensure_header(self) -> MpSection:
+        if self.header:
+            return self.header
+        nl=self.newline
+        section=MpSection("IMG ID",MpLine("[IMG ID]",nl),footer=MpLine("[END]",nl))
+        self.sections.insert(0,section);self.dirty=True
+        return section
+
     def add_object(self, kind: str, coordinates: list[tuple[float, float]], **props: str) -> MpSection:
         nl = self.newline
         section = MpSection(kind, MpLine(f"[{kind}]", nl), footer=MpLine("[END]", nl))
@@ -327,6 +400,7 @@ class MpDocument:
 
 def geometry_issues(doc: MpDocument) -> list[str]:
     issues: list[str] = []
+    road_ids: dict[str, int] = {}
     for index, obj in enumerate(doc.objects(), 1):
         groups = obj.coordinate_groups()
         if not groups:
@@ -341,5 +415,35 @@ def geometry_issues(doc: MpDocument) -> list[str]:
             for lat, lon in coords:
                 if not (-90 <= lat <= 90 and -180 <= lon <= 180):
                     issues.append(f"{label}: coordinate outside WGS84 bounds")
+        road_id = obj.get("RoadID").strip()
+        if road_id:
+            if road_id in road_ids:
+                issues.append(f"Object {index}: RoadID {road_id} duplicates object {road_ids[road_id]}")
+            else:
+                road_ids[road_id] = index
+        route_param = obj.get("RouteParam").strip()
+        if route_param:
+            values = [value.strip() for value in route_param.split(",")]
+            try:
+                numbers = [int(value) for value in values]
+            except ValueError:
+                issues.append(f"Object {index}: RouteParam contains a non-integer value")
+            else:
+                if len(numbers) < 12:
+                    issues.append(f"Object {index}: RouteParam needs 12 values for Navitel routing")
+                if numbers and not 0 <= numbers[0] <= 8:
+                    issues.append(f"Object {index}: RouteParam road class is outside 0..8")
+        primary = next((points for level, points in groups if level == 0), groups[0][1] if groups else [])
+        for key, value, _ in obj.pairs():
+            if not NOD_KEY_RE.match(key.strip()):
+                continue
+            fields = [field.strip() for field in value.split(",")]
+            try:
+                node_index = int(fields[0]); int(fields[1])
+            except (IndexError, ValueError):
+                issues.append(f"Object {index} {key}: expected node-index,NodeID,boundary")
+                continue
+            if not 0 <= node_index < len(primary):
+                issues.append(f"Object {index} {key}: node index {node_index} is outside Data0")
     return issues
 
