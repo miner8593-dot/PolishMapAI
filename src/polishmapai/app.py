@@ -33,6 +33,10 @@ from tkinter import filedialog, messagebox, simpledialog, ttk
 
 from .coordinates import format_coordinates, parse_coordinates
 from .mp import MpDocument, MpSection, geometry_issues
+from .navitel import (
+    LINE_NAMES, POINT_NAMES, POLYGON_NAMES, object_kind, style_for, type_code,
+    type_name,
+)
 from .shapefile_io import export_objects, import_objects
 from .spatial import BBox, IndexedObject, SpatialIndex, intersects, section_bbox
 
@@ -41,7 +45,10 @@ LOGGER = logging.getLogger("polishmapai.performance")
 MAX_PRIMITIVES = 12_000
 RENDER_BUDGET_SECONDS = 0.012
 DRAG_THRESHOLD = 5
-SCALES = [50, 100, 200, 500, 1_000, 2_000, 5_000, 10_000, 25_000, 50_000, 100_000, 250_000, 500_000, 1_000_000]
+SCALES = [10, 20, 30, 50, 80, 100, 200, 300, 500, 800, 1_000, 2_000,
+          3_000, 5_000, 8_000, 10_000, 20_000, 30_000, 50_000, 80_000,
+          100_000, 200_000, 300_000, 500_000, 800_000, 1_000_000,
+          2_000_000, 3_000_000]
 
 
 class Editor(tk.Tk):
@@ -53,6 +60,7 @@ class Editor(tk.Tk):
         self.index = SpatialIndex()
         self.selected: list[MpSection] = []
         self.mode = "select"
+        self.creation_types = {"POI": 0x2F00, "POLYLINE": 0x06, "POLYGON": 0x6C}
         self.pending: list[tuple[float, float]] = []
         self.zoom = 1.0; self.center = [0.0, 0.0]
         self.drag_start = None; self.drag_kind = None; self.drag_preview = (0, 0)
@@ -60,6 +68,8 @@ class Editor(tk.Tk):
         self.clipboard_objects: list[MpSection] = []
         self.level = tk.IntVar(value=0)
         self.status = tk.StringVar(value="Готово")
+        self.coordinate_status = tk.StringVar(value="")
+        self.selection_status = tk.StringVar(value="Объектов: 0")
         self.scale_text = tk.StringVar(value="100 км")
         self.loading_cancel = threading.Event(); self.worker_queue: queue.Queue = queue.Queue()
         self.render_after = None; self.wheel_after = None; self.resize_after = None
@@ -118,18 +128,23 @@ class Editor(tk.Tk):
         level_menu = tk.Menu(self.view_menu, tearoff=False)
         for level in range(0, 7): level_menu.add_radiobutton(label=f"Уровень {level}", variable=self.level, value=level, command=self.schedule_render)
         self.view_menu.add_cascade(label="Уровни детализации", menu=level_menu)
-        theme = tk.Menu(self.view_menu, tearoff=False); theme.add_radiobutton(label="Временное оформление", value="temporary", variable=tk.StringVar(value="temporary"))
-        self.view_menu.add_cascade(label="Темы/скины карты", menu=theme)
+        self.skin_name = tk.StringVar(value="navitel-ng")
+        theme = tk.Menu(self.view_menu, tearoff=False)
+        theme.add_radiobutton(label="Navitel (стандартное оформление NG)", value="navitel-ng", variable=self.skin_name, command=self.render_viewport)
+        theme.add_separator()
+        self._cmd(theme, "Управление оформлениями…", self.manage_skins)
+        self.view_menu.add_cascade(label="Оформление карты", menu=theme)
         for key, label in [("grid", "Сетка"), ("labels", "Подписи"), ("label_outline", "Окантовка подписей"), ("polygon_outlines", "Контуры полигонов"), ("transparent_polygons", "Прозрачные полигоны"), ("road_classes", "Классы дорог"), ("addresses", "Адреса"), ("coverage", "Область покрытия")]:
             self.view_menu.add_checkbutton(label=label, variable=self.view_vars[key], command=self._view_changed)
         self.view_menu.add_separator(); self._cmd(self.view_menu, "Обновить", self.render_viewport, "F5"); self._cmd(self.view_menu, "Перейти к координатам…", self.goto_coordinates, "Ctrl+G")
 
         favorites = tk.Menu(bar, tearoff=False); self._cmd(favorites, "Добавить текущий вид", self.add_favorite); self._cmd(favorites, "Список избранного…", self.show_favorites)
         tools = tk.Menu(bar, tearoff=False)
-        for label, mode in [("Выбор", "select"), ("Рука", "pan"), ("Создать POI", "POI"), ("Создать полилинию", "POLYLINE"), ("Создать полигон", "POLYGON")]: self._cmd(tools, label, lambda m=mode: self.set_mode(m))
-        tools.add_separator(); self._cmd(tools, "Проверить геометрию", self.check_geometry)
+        for label, mode in [("Выбор объектов", "select"), ("Редактировать узлы", "nodes"), ("Перемещать карту", "pan"), ("Создать точку (POI)", "POI"), ("Создать полилинию", "POLYLINE"), ("Создать полигон", "POLYGON")]: self._cmd(tools, label, lambda m=mode: self.set_mode(m))
+        tools.add_separator(); self._cmd(tools, "Выбрать тип создаваемого объекта…", self.choose_creation_type)
+        self._cmd(tools, "Проверить геометрию…", self.check_geometry)
         neural = tk.Menu(bar, tearoff=False); self._cmd(neural, "Открыть настройки нейросети…", self.neural_info)
-        help_menu = tk.Menu(bar, tearoff=False); self._cmd(help_menu, "О программе", lambda: messagebox.showinfo("О программе", "PolishMapAI\nНезависимый clean-room редактор.\nТема: «Временное оформление»; Garmin TYP пока не поддерживается."))
+        help_menu = tk.Menu(bar, tearoff=False); self._cmd(help_menu, "О программе", lambda: messagebox.showinfo("О программе", "PolishMapAI\nРедактор карт Polish MP для набора типов Navitel (NG).\nНезависимая clean-room реализация."))
         for label, menu in [("Файл", self.file_menu), ("Правка", self.edit_menu), ("Вид", self.view_menu), ("Избранное", favorites), ("Инструменты", tools), ("Нейросеть", neural), ("Справка", help_menu)]: bar.add_cascade(label=label, menu=menu)
         self.config(menu=bar)
 
@@ -141,21 +156,28 @@ class Editor(tk.Tk):
         for text, command in [("Новый", self.new_file), ("Открыть", self.open_file), ("Сохранить", self.save_file), ("↶", self.undo), ("↷", self.redo)]: ttk.Button(toolbar, text=text, command=command).pack(side="left", padx=1)
         ttk.Separator(toolbar, orient="vertical").pack(side="left", fill="y", padx=4)
         for text, mode in [("↖ Выбор", "select"), ("Узлы", "nodes"), ("✋ Рука", "pan"), ("● POI", "POI"), ("╱ Линия", "POLYLINE"), ("△ Полигон", "POLYGON")]: ttk.Button(toolbar, text=text, command=lambda m=mode: self.set_mode(m)).pack(side="left", padx=1)
+        self.type_button = ttk.Button(toolbar, text="Тип: —", command=self.choose_creation_type)
+        self.type_button.pack(side="left", padx=(5, 1))
         ttk.Button(toolbar, text="+", width=3, command=lambda: self.change_zoom(1.25)).pack(side="left", padx=(6, 0)); ttk.Button(toolbar, text="−", width=3, command=lambda: self.change_zoom(.8)).pack(side="left")
         self.scale_combo = ttk.Combobox(toolbar, textvariable=self.scale_text, values=[self._format_scale(s) for s in SCALES], width=10, state="readonly"); self.scale_combo.pack(side="left", padx=4); self.scale_combo.bind("<<ComboboxSelected>>", self._scale_selected)
         ttk.Label(toolbar, text="Детализация:").pack(side="left"); ttk.Spinbox(toolbar, from_=0, to=24, width=3, textvariable=self.level, command=self.schedule_render).pack(side="left")
-        pane = ttk.Panedwindow(self, orient="horizontal"); pane.pack(fill="both", expand=True)
-        map_frame = ttk.Frame(pane); prop_frame = ttk.Frame(pane, padding=6); pane.add(map_frame, weight=4); pane.add(prop_frame, weight=1)
-        self.canvas = tk.Canvas(map_frame, background="#f3f3f0", cursor="arrow", highlightthickness=0); self.canvas.pack(fill="both", expand=True)
+        map_frame = ttk.Frame(self); map_frame.pack(fill="both", expand=True)
+        # GPSMapEdit keeps the map in the whole client area.  Object data is
+        # edited in a modal Properties window instead of a permanent sidebar.
+        prop_frame = ttk.Frame(self)
+        self.canvas = tk.Canvas(map_frame, background="#f5f2e9", cursor="arrow", highlightthickness=0); self.canvas.pack(fill="both", expand=True)
         self.canvas.bind("<Configure>", self._on_resize); self.canvas.bind("<Button-1>", self.on_press); self.canvas.bind("<B1-Motion>", self.on_drag); self.canvas.bind("<ButtonRelease-1>", self.on_release); self.canvas.bind("<Double-Button-1>", self.on_double_click); self.canvas.bind("<Button-3>", self.on_context); self.canvas.bind("<Motion>", self.on_motion); self.canvas.bind("<MouseWheel>", self.on_wheel); self.canvas.bind("<Shift-MouseWheel>", self.on_wheel); self.canvas.bind("<Control-MouseWheel>", self.on_wheel)
-        ttk.Label(prop_frame, text="Свойства объектов", font=("Segoe UI", 11, "bold")).pack(anchor="w")
-        self.selection_label = ttk.Label(prop_frame, text="Ничего не выбрано"); self.selection_label.pack(anchor="w")
+        self.selection_label = ttk.Label(prop_frame, text="Ничего не выбрано")
         self.prop_tree = ttk.Treeview(prop_frame, columns=("value",), show="tree headings"); self.prop_tree.heading("#0", text="Поле"); self.prop_tree.heading("value", text="Значение"); self.prop_tree.pack(fill="both", expand=True, pady=5); self.prop_tree.bind("<Double-1>", self.edit_property)
         progress_frame = ttk.Frame(self); progress_frame.pack(fill="x"); self.progress = ttk.Progressbar(progress_frame, mode="determinate"); self.cancel_button = ttk.Button(progress_frame, text="Отмена загрузки", command=self.loading_cancel.set)
-        ttk.Label(self, textvariable=self.status, relief="sunken", anchor="w", padding=3).pack(fill="x")
+        statusbar=ttk.Frame(self);statusbar.pack(fill="x",side="bottom")
+        ttk.Label(statusbar,textvariable=self.status,relief="sunken",anchor="w",padding=(4,2)).pack(side="left",fill="x",expand=True)
+        ttk.Label(statusbar,textvariable=self.selection_status,relief="sunken",anchor="center",width=18,padding=(4,2)).pack(side="left")
+        ttk.Label(statusbar,textvariable=self.coordinate_status,relief="sunken",anchor="center",width=28,padding=(4,2)).pack(side="left")
+        ttk.Label(statusbar,textvariable=self.scale_text,relief="sunken",anchor="center",width=10,padding=(4,2)).pack(side="left")
 
     def _bind_keys(self):
-        bindings = {"<Control-n>": self.new_file, "<Control-o>": self.open_file, "<Control-s>": self.save_file, "<Control-Shift-S>": self.save_as, "<Control-z>": self.undo, "<Control-y>": self.redo, "<Control-x>": self.cut, "<Control-c>": self.copy, "<Control-v>": self.paste, "<Control-a>": self.select_all, "<Control-f>": self.find_object, "<Control-g>": self.goto_coordinates, "<Delete>": self.delete_selected, "<Home>": self.zoom_all, "<F5>": self.render_viewport, "<Escape>": self.cancel_interaction}
+        bindings = {"<Control-n>": self.new_file, "<Control-o>": self.open_file, "<Control-s>": self.save_file, "<Control-Shift-S>": self.save_as, "<Control-z>": self.undo, "<Control-y>": self.redo, "<Control-x>": self.cut, "<Control-c>": self.copy, "<Control-v>": self.paste, "<Control-a>": self.select_all, "<Control-f>": self.find_object, "<Control-g>": self.goto_coordinates, "<Alt-Return>": self.show_object_properties, "<Delete>": self.delete_selected, "<Home>": self.zoom_all, "<F5>": self.render_viewport, "<Escape>": self.cancel_interaction}
         for key, command in bindings.items(): self.bind(key, lambda e, c=command: c())
 
     # ----- loading/indexing -----------------------------------------
@@ -181,7 +203,7 @@ class Editor(tk.Tk):
                 event = self.worker_queue.get_nowait()
                 if event[0] == "progress": self.progress.configure(maximum=max(1, event[2]), value=event[1]); self.status.set(f"Загрузка: {event[1]:,} / {event[2]:,} строк")
                 elif event[0] == "loaded":
-                    _, self.doc, self.index, elapsed = event; self.selected.clear(); self.undo_stack.clear(); self.redo_stack.clear(); self.progress.pack_forget(); self.cancel_button.pack_forget(); self.title(f"PolishMapAI — {self.doc.path.name}"); self.first_frame_pending=True; self.zoom_all(); self._metric("open", elapsed, f"objects={len(self.index.items)}"); self.status.set(f"Загружено {len(self.index.items):,} объектов за {elapsed:.2f} с"); self._update_commands(); return
+                    _, self.doc, self.index, elapsed = event; self.selected.clear(); self.undo_stack.clear(); self.redo_stack.clear(); self.progress.pack_forget(); self.cancel_button.pack_forget(); self.title(f"PolishMapAI — {self.doc.path.name}"); self.first_frame_pending=True; self.zoom_all(); self._metric("open", elapsed, f"objects={len(self.index.items)}"); self.status.set(f"Загружено {len(self.index.items):,} объектов за {elapsed:.2f} с — TypeSet={self.doc.type_set or 'не указан'}"); self.selection_status.set(f"Объектов: {len(self.index.items):,}"); self._update_commands(); return
                 else:
                     self.progress.pack_forget(); self.cancel_button.pack_forget(); exc = event[1]; self.status.set(str(exc));
                     if not isinstance(exc, InterruptedError): messagebox.showerror("Ошибка открытия", str(exc))
@@ -208,10 +230,10 @@ class Editor(tk.Tk):
         started = time.perf_counter(); self.canvas.delete("map"); self.canvas.delete("overlay")
         width, height = max(1, self.canvas.winfo_width()), max(1, self.canvas.winfo_height())
         if self.view_vars["grid"].get():
-            for x in range(0, width, 100): self.canvas.create_line(x, 0, x, height, fill="#dedbd0", tags=("map",))
-            for y in range(0, height, 100): self.canvas.create_line(0, y, width, y, fill="#dedbd0", tags=("map",))
+            for x in range(0, width, 100): self.canvas.create_line(x, 0, x, height, fill="#e2ded3", tags=("map",))
+            for y in range(0, height, 100): self.canvas.create_line(0, y, width, y, fill="#e2ded3", tags=("map",))
         candidates = self.index.query(self.visible_bbox(80)) if self.index.items else []
-        candidates.sort(key=lambda item: 0 if item.section.name.upper() in {"POLYGON", "RGN80"} else 1)
+        candidates.sort(key=lambda item: style_for(item.section.name, item.section.get("Type")).order)
         self.render_state = {
             "generation": generation, "started": started, "candidates": candidates,
             "position": 0, "primitives": 0, "reason": self.render_reason,
@@ -246,22 +268,79 @@ class Editor(tk.Tk):
         obj = item.section
         if not self._visible_at_level(obj, item): return 0
         object_tag = f"object-{id(obj)}"
-        coords = obj.coordinates(self.level.get()); stride = self._generalization_stride(coords)
-        if stride > 1 and len(coords) > 2:
-            reduced = coords[::stride]; coords = reduced + ([coords[-1]] if coords[-1] != reduced[-1] else [])
-        points = [self.world_to_screen(lat, lon) for lat, lon in coords]
-        if not points: return 0
-        primitives = 0; selected = obj in self.selected; kind = obj.name.upper()
-        if kind in {"POI", "RGN10", "RGN20"}:
-            x, y = points[0]; self.canvas.create_oval(x-4, y-4, x+4, y+4, fill="#5b6573", outline="#1769aa" if selected else "#30343a", width=3 if selected else 1, tags=("map",object_tag)); primitives += 1
-        elif kind in {"POLYGON", "RGN80"} and len(points) >= 2:
-            flat = [v for p in points for v in p]; fill = "" if self.view_vars["transparent_polygons"].get() else "#b9c5b3"; outline = "#1769aa" if selected else ("#6d7868" if self.view_vars["polygon_outlines"].get() else fill)
-            self.canvas.create_polygon(*flat, fill=fill, outline=outline, width=3 if selected else 1, tags=("map",object_tag)); primitives += 1
-        elif len(points) >= 2:
-            flat = [v for p in points for v in p]; self.canvas.create_line(*flat, fill="#1769aa" if selected else "#60666d", width=4 if selected else 2, tags=("map",object_tag)); primitives += 1
+        point_groups = []
+        for coords in obj.geometries(self.level.get()):
+            stride = self._generalization_stride(coords)
+            if stride > 1 and len(coords) > 2:
+                reduced = coords[::stride]; coords = reduced + ([coords[-1]] if coords[-1] != reduced[-1] else [])
+            points = [self.world_to_screen(lat, lon) for lat, lon in coords]
+            if points:point_groups.append(points)
+        if not point_groups:return 0
+        primitives = 0; selected = obj in self.selected; kind = object_kind(obj.name)
+        style = style_for(obj.name, obj.get("Type"))
+        if kind == "point":
+            for points in point_groups:
+                primitives += self._draw_navitel_point(points[0], style, object_tag, selected)
+        elif kind == "polygon":
+            for points in point_groups:
+                if len(points)<2:continue
+                flat = [v for p in points for v in p]
+                fill = "" if self.view_vars["transparent_polygons"].get() else style.fill
+                outline = "#1769aa" if selected else (style.outline if self.view_vars["polygon_outlines"].get() else fill)
+                self.canvas.create_polygon(*flat, fill=fill, outline=outline,
+                                           width=3 if selected else 1,
+                                           dash=style.dash or (), tags=("map", object_tag)); primitives += 1
+        elif style.width:
+            for points in point_groups:
+                if len(points)<2:continue
+                flat = [v for p in points for v in p]
+                if style.casing:
+                    self.canvas.create_line(*flat, fill="#1769aa" if selected else style.casing,
+                                            width=style.casing_width + (2 if selected else 0),
+                                            capstyle="round", joinstyle="round",
+                                            tags=("map", object_tag)); primitives += 1
+                self.canvas.create_line(*flat, fill="#52a5db" if selected else style.color,
+                                        width=style.width + (1 if selected else 0),
+                                        dash=style.dash or (), capstyle="round", joinstyle="round",
+                                        tags=("map", object_tag)); primitives += 1
         if self.view_vars["labels"].get() and obj.get("Label") and self.zoom >= .2:
-            x, y = points[0]; self.canvas.create_text(x+5, y-7, text=obj.get("Label"), anchor="sw", fill="#202124", tags=("map",object_tag)); primitives += 1
+            x, y = point_groups[0][0]
+            offset = 7 if kind == "point" else 2
+            label = obj.get("Label").replace("~[0x1f]", " ")
+            if self.view_vars["label_outline"].get():
+                for ox, oy in ((-1, 0), (1, 0), (0, -1), (0, 1)):
+                    self.canvas.create_text(x+offset+ox, y-7+oy, text=label, anchor="sw",
+                                            fill="#f8f7f2", tags=("map", object_tag)); primitives += 1
+            self.canvas.create_text(x+offset, y-7, text=label, anchor="sw", fill=style.label_color,
+                                    font=("Tahoma", 8), tags=("map",object_tag)); primitives += 1
         return primitives
+
+    def _draw_navitel_point(self, point, style, object_tag, selected):
+        x, y = point; color = "#1769aa" if selected else style.color
+        size = max(3, style.width)
+        tags = ("map", object_tag)
+        if style.symbol == "city":
+            self.canvas.create_oval(x-size, y-size, x+size, y+size, fill=color,
+                                    outline="#ffffff", width=1, tags=tags)
+        elif style.symbol == "transport":
+            self.canvas.create_rectangle(x-4, y-4, x+4, y+4, fill="#ffffff",
+                                         outline=color, width=2, tags=tags)
+        elif style.symbol == "airport":
+            self.canvas.create_line(x-5, y, x+5, y, fill=color, width=2, tags=tags)
+            self.canvas.create_line(x, y-5, x, y+5, fill=color, width=2, tags=tags)
+        elif style.symbol in {"shop", "food", "fuel"}:
+            self.canvas.create_rectangle(x-4, y-4, x+4, y+4, fill=color,
+                                         outline="#ffffff", width=1, tags=tags)
+        elif style.symbol == "height":
+            self.canvas.create_polygon(x, y-5, x-5, y+4, x+5, y+4, fill=color,
+                                       outline="#ffffff", tags=tags)
+        else:
+            self.canvas.create_oval(x-3, y-3, x+3, y+3, fill=color,
+                                    outline="#ffffff", width=1, tags=tags)
+        if selected:
+            self.canvas.create_rectangle(x-7, y-7, x+7, y+7, outline="#1769aa",
+                                         width=2, tags=tags)
+        return 1
 
     def _draw_overlays(self):
         if self.pending:
@@ -272,11 +351,11 @@ class Editor(tk.Tk):
             x, y = self.world_to_screen(*self.goto_marker); self.canvas.create_line(x-10, y, x+10, y, fill="#d12d2d", width=2, tags=("overlay",)); self.canvas.create_line(x, y-10, x, y+10, fill="#d12d2d", width=2, tags=("overlay",))
         if self.mode == "nodes" and len(self.selected) == 1:
             active = self._active_data_level(self.selected[0])
-            for data_level, coords in self.selected[0].coordinate_groups():
+            for data_level, occurrence, coords in self.selected[0].coordinate_elements():
                 if data_level != active: continue
                 for node_index, (lat, lon) in enumerate(coords):
                     x, y = self.world_to_screen(lat, lon)
-                    self.canvas.create_rectangle(x-3, y-3, x+3, y+3, fill="#ffffff", outline="#1769aa", tags=("overlay", f"node-{data_level}-{node_index}"))
+                    self.canvas.create_rectangle(x-3, y-3, x+3, y+3, fill="#ffffff", outline="#1769aa", tags=("overlay", f"node-{data_level}-{occurrence}-{node_index}"))
 
     def _cancel_active_render(self):
         self.render_generation += 1; self.render_state = None
@@ -302,18 +381,24 @@ class Editor(tk.Tk):
 
     def world_to_screen(self, lat, lon):
         w, h = max(1, self.canvas.winfo_width()), max(1, self.canvas.winfo_height()); scale = 120 * self.zoom
-        return w/2 + (float(lon)-self.center[1])*scale, h/2 - (float(lat)-self.center[0])*scale
+        # GPSMapEdit displays geographic data in a conformal map view.  Correct
+        # longitude by the latitude of the viewport; plain degrees stretch a
+        # Siberian map almost twofold in the east-west direction.
+        lon_scale = max(.05, math.cos(math.radians(self.center[0])))
+        return w/2 + (float(lon)-self.center[1])*scale*lon_scale, h/2 - (float(lat)-self.center[0])*scale
 
     def screen_to_world(self, x, y):
         w, h = max(1, self.canvas.winfo_width()), max(1, self.canvas.winfo_height()); scale = 120*self.zoom
-        return self.center[0]-(y-h/2)/scale, self.center[1]+(x-w/2)/scale
+        lon_scale = max(.05, math.cos(math.radians(self.center[0])))
+        return self.center[0]-(y-h/2)/scale, self.center[1]+(x-w/2)/(scale*lon_scale)
 
     def zoom_all(self):
         bounds = self.index.bounds
         if not bounds: self.center=[0,0]; self.zoom=1; self.render_viewport(); return
         self.center=[(bounds[1]+bounds[3])/2, (bounds[0]+bounds[2])/2]
         width=max(1,self.canvas.winfo_width()); height=max(1,self.canvas.winfo_height()); lon_span=max(bounds[2]-bounds[0],1e-8); lat_span=max(bounds[3]-bounds[1],1e-8)
-        self.zoom=max(.001,min(1e6,min(width/(lon_span*144),height/(lat_span*144)))); self._sync_scale(); self.render_viewport()
+        lon_scale=max(.05,math.cos(math.radians(self.center[0])))
+        self.zoom=max(.001,min(1e6,min(width/(lon_span*lon_scale*144),height/(lat_span*144)))); self._sync_scale(); self.render_viewport()
 
     def change_zoom(self, factor, anchor=None):
         if anchor is None: anchor=(self.canvas.winfo_width()/2,self.canvas.winfo_height()/2)
@@ -326,7 +411,7 @@ class Editor(tk.Tk):
         self._pan_pixels(dx,dy); self.schedule_render(90,"pan"); return "break"
 
     def _pan_pixels(self, dx, dy):
-        self.canvas.move("map", -dx, -dy); scale=120*self.zoom; self.center[0]+=dy/scale; self.center[1]+=dx/scale
+        self.canvas.move("map", -dx, -dy); scale=120*self.zoom;lon_scale=max(.05,math.cos(math.radians(self.center[0])));self.center[0]+=dy/scale; self.center[1]+=dx/(scale*lon_scale)
 
     def _on_resize(self, event):
         if self.resize_after: self.after_cancel(self.resize_after)
@@ -371,7 +456,8 @@ class Editor(tk.Tk):
     def on_release(self,event):
         if not self.drag_start:return
         x,y,lat,lon=self.drag_start; dx,dy=event.x-x,event.y-y
-        if self.drag_kind=="pan": self.center=[lat+dy/(120*self.zoom),lon-dx/(120*self.zoom)]; self.schedule_render(30,"pan")
+        if self.drag_kind=="pan":
+            lon_scale=max(.05,math.cos(math.radians(lat)));self.center=[lat+dy/(120*self.zoom),lon-dx/(120*self.zoom*lon_scale)]; self.schedule_render(30,"pan")
         elif self.drag_kind=="box":
             self.canvas.delete("selection-box")
             if abs(dx)+abs(dy)<DRAG_THRESHOLD:
@@ -385,12 +471,12 @@ class Editor(tk.Tk):
                 else:self.selected=found
             self.refresh_properties();self.render_viewport()
         elif self.drag_kind=="objects" and abs(dx)+abs(dy)>=DRAG_THRESHOLD:
-            self.push_undo(); dlat=Decimal(str(-dy/(120*self.zoom)));dlon=Decimal(str(dx/(120*self.zoom)))
+            self.push_undo(); dlat=Decimal(str(-dy/(120*self.zoom)));lon_scale=max(.05,math.cos(math.radians(self.center[0])));dlon=Decimal(str(dx/(120*self.zoom*lon_scale)))
             for obj in self.selected:obj.translate(dlat,dlon)
             self.doc.dirty=True;self.rebuild_index();self.render_viewport()
         elif self.drag_kind=="node" and abs(dx)+abs(dy)>=DRAG_THRESHOLD:
-            self.push_undo();data_level,node_index=self.drag_node;new_lat,new_lon=self.screen_to_world(event.x,event.y)
-            self.selected[0].move_node(data_level,node_index,Decimal(str(new_lat)),Decimal(str(new_lon)))
+            self.push_undo();data_level,occurrence,node_index=self.drag_node;new_lat,new_lon=self.screen_to_world(event.x,event.y)
+            self.selected[0].move_node(data_level,node_index,Decimal(str(new_lat)),Decimal(str(new_lon)),occurrence)
             self.doc.dirty=True;self.rebuild_index();self.render_viewport()
         self.drag_start=None;self.drag_kind=None;self.drag_preview=(0,0);self.canvas.configure(cursor="arrow" if self.mode=="select" else "hand2")
 
@@ -410,10 +496,12 @@ class Editor(tk.Tk):
         return ranked[self.hit_cycle][1]
 
     def _screen_distance(self,obj,x,y):
-        points=[self.world_to_screen(a,b) for a,b in obj.coordinates(self.level.get())]
-        if not points:return math.inf
-        if len(points)==1:return math.hypot(points[0][0]-x,points[0][1]-y)
-        return min(self._segment_distance(x,y,*a,*b) for a,b in zip(points,points[1:]))
+        best=math.inf
+        for coords in obj.geometries(self.level.get()):
+            points=[self.world_to_screen(a,b) for a,b in coords]
+            if len(points)==1:best=min(best,math.hypot(points[0][0]-x,points[0][1]-y))
+            elif len(points)>1:best=min(best,min(self._segment_distance(x,y,*a,*b) for a,b in zip(points,points[1:])))
+        return best
 
     @staticmethod
     def _segment_distance(px,py,x1,y1,x2,y2):
@@ -432,8 +520,14 @@ class Editor(tk.Tk):
         if self.mode in {"POLYLINE","POLYGON"}:
             if len(self.pending)>=2 and self.pending[-1]==self.pending[-2]:self.pending.pop()
             self.finish_drawing()
+        elif self.mode=="select":
+            hit=self.hit_test(event.x,event.y)
+            if hit:
+                self.selected=[hit];self.refresh_properties();self.show_object_properties()
 
-    def on_motion(self,event):self.last_cursor_coordinate=self.screen_to_world(event.x,event.y)
+    def on_motion(self,event):
+        self.last_cursor_coordinate=self.screen_to_world(event.x,event.y)
+        self.coordinate_status.set(format_coordinates(*self.last_cursor_coordinate,self.view_options.get("coordinate_format","DD")))
 
     def _active_data_level(self,obj):
         groups=obj.coordinate_groups();eligible=[number for number,_ in groups if number<=self.level.get()]
@@ -442,17 +536,29 @@ class Editor(tk.Tk):
     def _hit_node(self,x,y):
         if len(self.selected)!=1:return None
         active=self._active_data_level(self.selected[0])
-        for data_level,coords in self.selected[0].coordinate_groups():
+        for data_level,occurrence,coords in self.selected[0].coordinate_elements():
             if data_level!=active:continue
             for node_index,(lat,lon) in enumerate(coords):
                 px,py=self.world_to_screen(lat,lon)
-                if math.hypot(px-x,py-y)<=8:return data_level,node_index
+                if math.hypot(px-x,py-y)<=8:return data_level,occurrence,node_index
         return None
 
     # ----- context/location -----------------------------------------
     def on_context(self,event):
         self.context_coordinate=self.screen_to_world(event.x,event.y)
-        menu=tk.Menu(self,tearoff=False);location=tk.Menu(menu,tearoff=False)
+        hit=self.hit_test(event.x,event.y) if self.mode in {"select","nodes"} else None
+        menu=tk.Menu(self,tearoff=False)
+        if hit:
+            if hit not in self.selected:self.selected=[hit];self.refresh_properties();self.render_viewport()
+            menu.add_command(label="Свойства…",command=self.show_object_properties,accelerator="Alt+Enter")
+            modify=tk.Menu(menu,tearoff=False)
+            modify.add_command(label="Изменить тип…",command=self.change_selected_type)
+            modify.add_command(label="Редактировать узлы",command=lambda:self.set_mode("nodes"))
+            modify.add_command(label="Обратить порядок точек",command=self.reverse_selected)
+            menu.add_cascade(label="Изменить",menu=modify)
+            menu.add_separator();menu.add_command(label="Вырезать",command=self.cut,accelerator="Ctrl+X");menu.add_command(label="Копировать",command=self.copy,accelerator="Ctrl+C");menu.add_command(label="Удалить",command=self.delete_selected,accelerator="Del")
+            menu.add_separator()
+        location=tk.Menu(menu,tearoff=False)
         location.add_command(label="Вставить здесь",command=self.paste_here,state="normal" if self.clipboard_objects else "disabled")
         templates=tk.Menu(location,tearoff=False);templates.add_command(label="Нет шаблонов",state="disabled");location.add_cascade(label="Вставить шаблон полигона",menu=templates,state="disabled");location.add_command(label="Удалить шаблон полигона…",state="disabled");location.add_separator();location.add_command(label="Копировать координаты",command=self.copy_context_coordinates);location.add_separator()
         browse=tk.Menu(location,tearoff=False);browse.add_command(label="Карты Google",command=lambda:self.browse_context("https://www.google.com/maps/search/?api=1&query={lat}%2C{lon}"));browse.add_command(label="Bing Maps",command=lambda:self.browse_context("https://www.bing.com/maps?cp={lat}~{lon}&lvl={zoom}"));location.add_cascade(label="Обзор в",menu=browse)
@@ -528,31 +634,100 @@ class Editor(tk.Tk):
     def invert_selection(self):
         chosen=set(id(x) for x in self.selected);self.selected=[x.section for x in self.index.items if id(x.section) not in chosen];self.refresh_properties();self.render_viewport()
     def rebuild_index(self):self.index.build(self.doc.objects())
-    def set_mode(self,mode):self.mode=mode;self.pending=[];self.canvas.configure(cursor="hand2" if mode=="pan" else "crosshair" if mode in {"POI","POLYLINE","POLYGON"} else "arrow");self.status.set(f"Режим: {mode}");self.render_viewport()
+    def set_mode(self,mode):
+        self.mode=mode;self.pending=[];self.canvas.configure(cursor="hand2" if mode=="pan" else "crosshair" if mode in {"POI","POLYLINE","POLYGON"} else "arrow")
+        if mode in self.creation_types:
+            code=self.creation_types[mode];self.type_button.configure(text=f"Тип: 0x{code:X} — {type_name(mode, hex(code))}")
+        else:self.type_button.configure(text="Тип: —")
+        self.status.set(f"Режим: {mode}");self.render_viewport()
     def finish_drawing(self):
         if not self.pending:return
         if self.mode=="POLYGON" and len(self.pending)>=3:self.pending.append(self.pending[0])
         if self.mode=="POLYLINE" and len(self.pending)<2:return
         if self.mode=="POLYGON" and len(self.pending)<4:return
-        self.push_undo();obj=self.doc.add_object(self.mode,self.pending);self.index.insert(obj);self.selected=[obj];self.pending=[];self.set_mode("select");self.refresh_properties();self.render_viewport()
+        self.push_undo();obj=self.doc.add_object(self.mode,self.pending,Type=f"0x{self.creation_types[self.mode]:X}");self.index.insert(obj);self.selected=[obj];self.pending=[];self.set_mode("select");self.refresh_properties();self.render_viewport()
     def refresh_properties(self):
         self.prop_tree.delete(*self.prop_tree.get_children());self.selection_label.configure(text=f"Выбрано: {len(self.selected)}")
+        self.selection_status.set(f"Выбрано: {len(self.selected)}")
         if not self.selected:return
         common={k.strip():v for k,v,_ in self.selected[0].pairs()}
         for obj in self.selected[1:]:
             values={k.strip():v for k,v,_ in obj.pairs()};common={k:v for k,v in common.items() if values.get(k)==v}
-        for key,value in common.items():self.prop_tree.insert("","end",text=key,values=(value,))
+        for key,value in common.items():
+            shown = f"{value} — {type_name(self.selected[0].name, value)}" if key.strip().lower()=="type" else value
+            self.prop_tree.insert("","end",text=key,values=(shown,))
         self._update_commands()
     def edit_property(self,event):
         item=self.prop_tree.identify_row(event.y)
         if not item or not self.selected:return
-        key=self.prop_tree.item(item,"text");old=self.prop_tree.item(item,"values")[0];value=simpledialog.askstring("Изменить свойство",key,initialvalue=old,parent=self)
+        key=self.prop_tree.item(item,"text")
+        if key.strip().lower()=="type":
+            value=self._type_dialog(self.selected[0].name, type_code(self.selected[0].get("Type")))
+            value=f"0x{value:X}" if value is not None else None
+        else:
+            old=self.selected[0].get(key);value=simpledialog.askstring("Изменить свойство",key,initialvalue=old,parent=self)
         if value is not None:
             self.push_undo()
             for obj in self.selected:obj.set(key,value,self.doc.newline)
             self.doc.dirty=True
             if key.strip().lower() in {"nodeid","roadid"}:self.rebuild_index()
             self.refresh_properties();self.render_viewport()
+
+    def change_selected_type(self):
+        if not self.selected:return
+        first=self.selected[0];chosen=self._type_dialog(first.name,type_code(first.get("Type")))
+        if chosen is None:return
+        self.push_undo()
+        for obj in self.selected:
+            if object_kind(obj.name)==object_kind(first.name):obj.set("Type",f"0x{chosen:X}",self.doc.newline)
+        self.doc.dirty=True;self.refresh_properties();self.render_viewport()
+
+    def reverse_selected(self):
+        targets=[obj for obj in self.selected if object_kind(obj.name) in {"line","polygon"}]
+        if not targets:return
+        self.push_undo()
+        for obj in targets:obj.reverse_coordinates()
+        self.doc.dirty=True;self.rebuild_index();self.render_viewport()
+
+    def show_object_properties(self):
+        if not self.selected:return
+        obj=self.selected[0];win=tk.Toplevel(self);win.title(f"Свойства объекта — {type_name(obj.name,obj.get('Type'))}");win.transient(self);win.grab_set();win.geometry("690x520")
+        book=ttk.Notebook(win);book.pack(fill="both",expand=True,padx=8,pady=8)
+        routing={"roadid","routeparam","dirindicator","nodid","nodeid"}
+        address={"streetdesc","street","cityname","city","regionname","region","countryname","country","zip","postalcode","housenumber"}
+        general={"type","label","label2","label3","endlevel","levels","marine","floors"}
+        tabs={name:ttk.Frame(book) for name in ("Общие","Адрес","Маршрутизация","Точки","Исходные данные")}
+        for name,frame in tabs.items():book.add(frame,text=name)
+        trees={}
+        for name,frame in tabs.items():
+            tree=ttk.Treeview(frame,columns=("value",),show="headings");tree.heading("value",text="Параметр и значение");tree.column("value",width=620);tree.pack(fill="both",expand=True);trees[name]=tree
+        rows={}
+        for key,value,_ in obj.pairs():
+            low=key.strip().lower()
+            if low.startswith("data"):tab="Точки"
+            elif low in routing or low.startswith("node") or low.startswith("numbers"):tab="Маршрутизация"
+            elif low in address:tab="Адрес"
+            elif low in general:tab="Общие"
+            else:tab="Исходные данные"
+            iid=trees[tab].insert("","end",values=(f"{key} = {value}",));rows[(tab,iid)]=(key,value)
+        edited={"undo":False}
+        def edit(tab,tree,event=None):
+            iid=tree.focus()
+            if not iid:return
+            key,old=rows[(tab,iid)]
+            if key.strip().lower()=="type":
+                code=self._type_dialog(obj.name,type_code(old));value=f"0x{code:X}" if code is not None else None
+            else:value=simpledialog.askstring("Свойство объекта",key,initialvalue=old,parent=win)
+            if value is None:return
+            if not edited["undo"]:self.push_undo();edited["undo"]=True
+            obj.set(key,value,self.doc.newline);self.doc.dirty=True;rows[(tab,iid)]=(key,value);tree.item(iid,values=(f"{key} = {value}",))
+        for tab,tree in trees.items():tree.bind("<Double-1>",lambda e,t=tab,tr=tree:edit(t,tr,e))
+        footer=ttk.Frame(win,padding=(8,0,8,8));footer.pack(fill="x")
+        ttk.Label(footer,text="Двойной щелчок изменяет выбранное поле").pack(side="left")
+        def close():
+            if edited["undo"]:self.rebuild_index();self.refresh_properties();self.render_viewport()
+            win.destroy()
+        ttk.Button(footer,text="Закрыть",command=close).pack(side="right");win.protocol("WM_DELETE_WINDOW",close);win.bind("<Escape>",lambda e:close())
 
     # ----- dialogs/commands ----------------------------------------
     def goto_coordinates(self):
@@ -582,6 +757,55 @@ class Editor(tk.Tk):
     def show_log(self):messagebox.showinfo("Журнал сообщений","\n".join(self.metrics[-100:]) or "Журнал пуст")
     def check_geometry(self):
         issues=geometry_issues(self.doc);messagebox.showinfo("Проверка геометрии","Ошибок нет" if not issues else "\n".join(issues[:100]))
+
+    def choose_creation_type(self):
+        if self.mode not in self.creation_types:
+            mode = "POI"
+        else:
+            mode = self.mode
+        chosen = self._type_dialog(mode, self.creation_types[mode])
+        if chosen is not None:
+            self.creation_types[mode] = chosen
+            self.set_mode(mode)
+
+    def _type_dialog(self, section_name, current):
+        kind = object_kind(section_name)
+        table = {"point": POINT_NAMES, "line": LINE_NAMES, "polygon": POLYGON_NAMES}[kind]
+        win=tk.Toplevel(self);win.title("Выбор типа объекта — Navitel");win.transient(self);win.grab_set();win.geometry("580x520")
+        result={"value":None};query=tk.StringVar()
+        top=ttk.Frame(win,padding=8);top.pack(fill="x")
+        ttk.Label(top,text="Найти:").pack(side="left");search=ttk.Entry(top,textvariable=query);search.pack(side="left",fill="x",expand=True,padx=6)
+        tree=ttk.Treeview(win,columns=("code","name"),show="headings",selectmode="browse")
+        tree.heading("code",text="Код");tree.heading("name",text="Название типа Navitel");tree.column("code",width=90,anchor="center",stretch=False);tree.column("name",width=420)
+        tree.pack(fill="both",expand=True,padx=8)
+        status=ttk.Label(win,text="Встроенный набор типов Navitel (TypeSet=NG)",anchor="w");status.pack(fill="x",padx=8,pady=4)
+        def populate(*_):
+            tree.delete(*tree.get_children());needle=query.get().casefold();selected=None
+            for code,name in sorted(table.items()):
+                text=f"0x{code:X} {name}".casefold()
+                if needle and needle not in text:continue
+                iid=tree.insert("","end",values=(f"0x{code:X}",name))
+                if code==current:selected=iid
+            if selected:tree.selection_set(selected);tree.see(selected)
+        def accept(*_):
+            selection=tree.selection()
+            if not selection:return
+            result["value"]=int(tree.item(selection[0],"values")[0],16);win.destroy()
+        buttons=ttk.Frame(win,padding=8);buttons.pack(fill="x")
+        ttk.Button(buttons,text="ОК",command=accept).pack(side="right",padx=4)
+        ttk.Button(buttons,text="Отмена",command=win.destroy).pack(side="right")
+        query.trace_add("write",populate);tree.bind("<Double-1>",accept);win.bind("<Return>",accept);win.bind("<Escape>",lambda e:win.destroy())
+        populate();search.focus_set();self.wait_window(win);return result["value"]
+
+    def manage_skins(self):
+        win=tk.Toplevel(self);win.title("Управление оформлениями карты");win.transient(self);win.grab_set();win.resizable(False,False)
+        frame=ttk.Frame(win,padding=12);frame.pack(fill="both",expand=True)
+        ttk.Label(frame,text="Оформления для набора типов Navitel",font=("Segoe UI",10,"bold")).grid(row=0,column=0,columnspan=2,sticky="w",pady=(0,8))
+        ttk.Label(frame,text="●",foreground="#5c8e43",font=("Segoe UI",16)).grid(row=1,column=0,padx=(0,8))
+        ttk.Label(frame,text="Navitel (стандартное оформление NG)\nВстроено, активно").grid(row=1,column=1,sticky="w")
+        ttk.Separator(frame).grid(row=2,column=0,columnspan=2,sticky="ew",pady=10)
+        ttk.Label(frame,text="Для карт с TypeSet=NG применяется каталог типов Navitel.\nФайлы Garmin TYP к этому оформлению не относятся.",justify="left").grid(row=3,column=0,columnspan=2,sticky="w")
+        ttk.Button(frame,text="Закрыть",command=win.destroy).grid(row=4,column=1,sticky="e",pady=(12,0))
     def import_shapefile(self):
         path=filedialog.askopenfilename(filetypes=[("ESRI Shapefile","*.shp")])
         if path:self.push_undo();count=import_objects(path,self.doc);self.rebuild_index();self.zoom_all();self.status.set(f"Импортировано: {count}")

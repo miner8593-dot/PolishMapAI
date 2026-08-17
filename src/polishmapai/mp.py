@@ -69,6 +69,27 @@ class MpSection:
                 groups.append((int(match.group(1)), coords))
         return groups
 
+    def coordinate_elements(self) -> list[tuple[int, int, list[tuple[Decimal, Decimal]]]]:
+        """Return ``(DataN, occurrence, coordinates)`` for each map element."""
+        occurrences: dict[int, int] = {}
+        elements = []
+        for level, coords in self.coordinate_groups():
+            occurrence = occurrences.get(level, 0)
+            occurrences[level] = occurrence + 1
+            elements.append((level, occurrence, coords))
+        return elements
+
+    def geometries(self, level: int | None = None) -> list[list[tuple[Decimal, Decimal]]]:
+        """Return separate geometry elements for the selected detail level."""
+        elements = self.coordinate_elements()
+        if level is None:
+            return [coords for _, _, coords in elements]
+        eligible = [data_level for data_level, _, _ in elements if data_level <= level]
+        if not eligible:
+            return [elements[0][2]] if elements else []
+        chosen = max(eligible)
+        return [coords for data_level, _, coords in elements if data_level == chosen]
+
     def coordinates(self, level: int | None = None) -> list[tuple[Decimal, Decimal]]:
         groups = self.coordinate_groups()
         if level is None:
@@ -80,12 +101,16 @@ class MpSection:
 
     def move_node(
         self, data_level: int, node_index: int,
-        latitude: Decimal, longitude: Decimal,
+        latitude: Decimal, longitude: Decimal, occurrence: int = 0,
     ) -> None:
         """Move one node in one DataN line while preserving all other text."""
         target = f"data{data_level}"
+        seen_element = -1
         for key, value, line_index in self.pairs():
             if key.strip().lower() != target:
+                continue
+            seen_element += 1
+            if seen_element != occurrence:
                 continue
             seen = -1
 
@@ -113,6 +138,24 @@ class MpSection:
                 lon = Decimal(match.group(2)) + delta_lon
                 return f"({lat:f},{lon:f})"
             self.lines[index].text = f"{key}={COORD_RE.sub(replace, value)}"
+
+    def reverse_coordinates(self) -> None:
+        """Reverse every geometry element while preserving non-coordinate text."""
+        for key, value, index in self.pairs():
+            if not DATA_KEY_RE.match(key.strip()):
+                continue
+            matches = list(COORD_RE.finditer(value))
+            if len(matches) < 2:
+                continue
+            reversed_coords = [match.group(0) for match in reversed(matches)]
+            parts: list[str] = []
+            cursor = 0
+            for match, replacement in zip(matches, reversed_coords):
+                parts.append(value[cursor:match.start()])
+                parts.append(replacement)
+                cursor = match.end()
+            parts.append(value[cursor:])
+            self.lines[index].text = f"{key}={''.join(parts)}"
 
     @property
     def is_object(self) -> bool:
@@ -208,6 +251,17 @@ class MpDocument:
 
     def objects(self) -> list[MpSection]:
         return [s for s in self.sections if s.is_object]
+
+    @property
+    def header(self) -> MpSection | None:
+        for section in self.sections:
+            if section.name.upper().replace("_", " ") == "IMG ID":
+                return section
+        return None
+
+    @property
+    def type_set(self) -> str:
+        return self.header.get("TypeSet") if self.header else ""
 
     def add_object(self, kind: str, coordinates: list[tuple[float, float]], **props: str) -> MpSection:
         nl = self.newline

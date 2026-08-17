@@ -15,6 +15,12 @@ def test_noop_round_trip_is_byte_identical():
     assert document.to_bytes() == SAMPLE
 
 
+def test_map_header_and_navitel_type_set():
+    document = MpDocument.from_bytes(SAMPLE.replace(b"UnknownHeader=keep me", b"TypeSet=NG"))
+    assert document.header is not None
+    assert document.type_set == "NG"
+
+
 def test_unknown_fields_comments_order_and_precision_survive_edit():
     document = MpDocument.from_bytes(SAMPLE)
     obj = document.objects()[0]
@@ -62,3 +68,20 @@ def test_geometry_validation_checks_each_detail_level_separately():
         b"[END]\r\n"
     )
     assert geometry_issues(MpDocument.from_bytes(source)) == []
+
+
+def test_reverse_coordinates_preserves_data_syntax():
+    doc = MpDocument.from_bytes(b"[POLYLINE]\r\nData0=(1,2),(3,4),(5,6)\r\n[END]\r\n")
+    obj = doc.objects()[0]
+    obj.reverse_coordinates()
+    assert obj.get("Data0") == "(5,6),(3,4),(1,2)"
+
+
+def test_repeated_data_lines_are_separate_elements_and_edit_locally():
+    source = (b"[POLYLINE]\r\nData0=(1,1),(2,2)\r\n"
+              b"Data0=(10,10),(20,20)\r\n[END]\r\n")
+    obj = MpDocument.from_bytes(source).objects()[0]
+    assert obj.geometries(0) == [[(1, 1), (2, 2)], [(10, 10), (20, 20)]]
+    obj.move_node(0, 1, 30, 40, occurrence=1)
+    assert obj.geometries(0)[0] == [(1, 1), (2, 2)]
+    assert obj.geometries(0)[1] == [(10, 10), (30, 40)]
