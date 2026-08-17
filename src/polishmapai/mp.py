@@ -10,6 +10,7 @@ from typing import Callable
 SECTION_RE = re.compile(r"^\s*\[([^]]+)]\s*$")
 PAIR_RE = re.compile(r"^([^=]+)=(.*)$")
 COORD_RE = re.compile(r"\(\s*([-+]?\d+(?:\.\d+)?)\s*,\s*([-+]?\d+(?:\.\d+)?)\s*\)")
+DATA_KEY_RE = re.compile(r"^data(\d+)$", re.IGNORECASE)
 OBJECT_SECTIONS = {"POI", "POLYLINE", "POLYGON", "RGN10", "RGN20", "RGN40", "RGN80"}
 
 
@@ -51,16 +52,56 @@ class MpSection:
                 return
         self.lines.append(MpLine(f"{key}={value}", newline))
 
-    def coordinates(self) -> list[tuple[Decimal, Decimal]]:
-        coords: list[tuple[Decimal, Decimal]] = []
+    def coordinate_groups(self) -> list[tuple[int, list[tuple[Decimal, Decimal]]]]:
+        """Return each DataN geometry without joining alternative levels."""
+        groups: list[tuple[int, list[tuple[Decimal, Decimal]]]] = []
         for key, value, _ in self.pairs():
-            if key.strip().lower().startswith("data"):
-                for lat, lon in COORD_RE.findall(value):
-                    try:
-                        coords.append((Decimal(lat), Decimal(lon)))
-                    except InvalidOperation:
-                        pass
-        return coords
+            match = DATA_KEY_RE.match(key.strip())
+            if not match:
+                continue
+            coords: list[tuple[Decimal, Decimal]] = []
+            for lat, lon in COORD_RE.findall(value):
+                try:
+                    coords.append((Decimal(lat), Decimal(lon)))
+                except InvalidOperation:
+                    pass
+            if coords:
+                groups.append((int(match.group(1)), coords))
+        return groups
+
+    def coordinates(self, level: int | None = None) -> list[tuple[Decimal, Decimal]]:
+        groups = self.coordinate_groups()
+        if level is None:
+            return [point for _, points in groups for point in points]
+        eligible = [group for group in groups if group[0] <= level]
+        if not eligible:
+            eligible = groups[:1]
+        return max(eligible, key=lambda group: group[0])[1] if eligible else []
+
+    def move_node(
+        self, data_level: int, node_index: int,
+        latitude: Decimal, longitude: Decimal,
+    ) -> None:
+        """Move one node in one DataN line while preserving all other text."""
+        target = f"data{data_level}"
+        for key, value, line_index in self.pairs():
+            if key.strip().lower() != target:
+                continue
+            seen = -1
+
+            def replace(match: re.Match) -> str:
+                nonlocal seen
+                seen += 1
+                if seen != node_index:
+                    return match.group(0)
+                return f"({latitude:f},{longitude:f})"
+
+            changed = COORD_RE.sub(replace, value)
+            if seen < node_index:
+                raise IndexError("Node index is outside the Data line")
+            self.lines[line_index].text = f"{key}={changed}"
+            return
+        raise KeyError(f"Data{data_level} is not present")
 
     def translate(self, delta_lat: Decimal, delta_lon: Decimal) -> None:
         """Translate every Data*/coordinate pair without collapsing detail levels."""
@@ -195,18 +236,18 @@ class MpDocument:
 def geometry_issues(doc: MpDocument) -> list[str]:
     issues: list[str] = []
     for index, obj in enumerate(doc.objects(), 1):
-        coords = obj.coordinates()
-        if not coords:
+        groups = obj.coordinate_groups()
+        if not groups:
             issues.append(f"Object {index}: no coordinates")
-        if obj.name.upper() in {"POLYLINE", "RGN40"} and len(coords) < 2:
-            issues.append(f"Object {index}: polyline needs at least 2 nodes")
-        if obj.name.upper() in {"POLYGON", "RGN80"}:
-            if len(coords) < 3:
-                issues.append(f"Object {index}: polygon needs at least 3 nodes")
-            elif coords[0] != coords[-1]:
-                issues.append(f"Object {index}: polygon is not closed")
-        for lat, lon in coords:
-            if not (-90 <= lat <= 90 and -180 <= lon <= 180):
-                issues.append(f"Object {index}: coordinate outside WGS84 bounds")
+        for data_level, coords in groups:
+            label = f"Object {index} Data{data_level}"
+            if obj.name.upper() in {"POLYLINE", "RGN40"} and len(coords) < 2:
+                issues.append(f"{label}: polyline needs at least 2 nodes")
+            if obj.name.upper() in {"POLYGON", "RGN80"}:
+                if len(coords) < 3:
+                    issues.append(f"{label}: polygon needs at least 3 nodes")
+            for lat, lon in coords:
+                if not (-90 <= lat <= 90 and -180 <= lon <= 180):
+                    issues.append(f"{label}: coordinate outside WGS84 bounds")
     return issues
 

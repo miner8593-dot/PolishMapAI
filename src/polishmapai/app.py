@@ -39,6 +39,7 @@ from .spatial import BBox, IndexedObject, SpatialIndex, intersects, section_bbox
 
 LOGGER = logging.getLogger("polishmapai.performance")
 MAX_PRIMITIVES = 12_000
+RENDER_BUDGET_SECONDS = 0.012
 DRAG_THRESHOLD = 5
 SCALES = [50, 100, 200, 500, 1_000, 2_000, 5_000, 10_000, 25_000, 50_000, 100_000, 250_000, 500_000, 1_000_000]
 
@@ -62,9 +63,11 @@ class Editor(tk.Tk):
         self.scale_text = tk.StringVar(value="100 км")
         self.loading_cancel = threading.Event(); self.worker_queue: queue.Queue = queue.Queue()
         self.render_after = None; self.wheel_after = None; self.resize_after = None
+        self.render_generation = 0; self.render_state = None; self.drag_node = None
         self.render_reason = "viewport"; self.first_frame_pending = False
         self.context_coordinate = (0.0, 0.0)
         self.last_cursor_coordinate = None; self.goto_marker = None
+        self.last_hit_point = None; self.last_hit_ids = (); self.hit_cycle = 0
         self.metrics: list[str] = []
         self.view_options = self._load_view_options()
         self.view_vars = {
@@ -73,6 +76,7 @@ class Editor(tk.Tk):
             if isinstance(value, bool)
         }
         self._build_menu(); self._build_ui(); self._bind_keys(); self._update_commands()
+        self.protocol("WM_DELETE_WINDOW", self.request_exit)
 
     # ----- interface -------------------------------------------------
     def _build_menu(self):
@@ -90,7 +94,7 @@ class Editor(tk.Tk):
         self.file_menu.add_cascade(label="Импорт", menu=imp); self.file_menu.add_cascade(label="Экспорт", menu=exp)
         self._cmd(self.file_menu, "Свойства карты", self.map_properties)
         self._cmd(self.file_menu, "Журнал сообщений", self.show_log)
-        self.file_menu.add_separator(); self._cmd(self.file_menu, "Выход", self.destroy)
+        self.file_menu.add_separator(); self._cmd(self.file_menu, "Выход", self.request_exit)
 
         self.edit_menu = tk.Menu(bar, tearoff=False)
         for label, command, key in [("Отменить", self.undo, "Ctrl+Z"), ("Вернуть", self.redo, "Ctrl+Y"), ("Вырезать", self.cut, "Ctrl+X"), ("Копировать", self.copy, "Ctrl+C"), ("Вставить", self.paste, "Ctrl+V"), ("Удалить", self.delete_selected, "Del")]:
@@ -135,7 +139,7 @@ class Editor(tk.Tk):
         toolbar = ttk.Frame(self, padding=3); toolbar.pack(fill="x")
         for text, command in [("Новый", self.new_file), ("Открыть", self.open_file), ("Сохранить", self.save_file), ("↶", self.undo), ("↷", self.redo)]: ttk.Button(toolbar, text=text, command=command).pack(side="left", padx=1)
         ttk.Separator(toolbar, orient="vertical").pack(side="left", fill="y", padx=4)
-        for text, mode in [("↖ Выбор", "select"), ("✋ Рука", "pan"), ("● POI", "POI"), ("╱ Линия", "POLYLINE"), ("△ Полигон", "POLYGON")]: ttk.Button(toolbar, text=text, command=lambda m=mode: self.set_mode(m)).pack(side="left", padx=1)
+        for text, mode in [("↖ Выбор", "select"), ("Узлы", "nodes"), ("✋ Рука", "pan"), ("● POI", "POI"), ("╱ Линия", "POLYLINE"), ("△ Полигон", "POLYGON")]: ttk.Button(toolbar, text=text, command=lambda m=mode: self.set_mode(m)).pack(side="left", padx=1)
         ttk.Button(toolbar, text="+", width=3, command=lambda: self.change_zoom(1.25)).pack(side="left", padx=(6, 0)); ttk.Button(toolbar, text="−", width=3, command=lambda: self.change_zoom(.8)).pack(side="left")
         self.scale_combo = ttk.Combobox(toolbar, textvariable=self.scale_text, values=[self._format_scale(s) for s in SCALES], width=10, state="readonly"); self.scale_combo.pack(side="left", padx=4); self.scale_combo.bind("<<ComboboxSelected>>", self._scale_selected)
         ttk.Label(toolbar, text="Детализация:").pack(side="left"); ttk.Spinbox(toolbar, from_=0, to=24, width=3, textvariable=self.level, command=self.schedule_render).pack(side="left")
@@ -156,7 +160,7 @@ class Editor(tk.Tk):
     # ----- loading/indexing -----------------------------------------
     def open_file(self):
         path = filedialog.askopenfilename(filetypes=[("Polish map", "*.mp"), ("Все файлы", "*.*")])
-        if path: self.open_path(path)
+        if path and self._can_discard_changes(): self.open_path(path)
 
     def open_path(self, path):
         self.loading_cancel.clear(); self.progress.configure(value=0); self.progress.pack(side="left", fill="x", expand=True); self.cancel_button.pack(side="right")
@@ -198,6 +202,8 @@ class Editor(tk.Tk):
 
     def render_viewport(self):
         if self.render_after: self.after_cancel(self.render_after); self.render_after = None
+        self.render_generation += 1
+        generation = self.render_generation
         started = time.perf_counter(); self.canvas.delete("map"); self.canvas.delete("overlay")
         width, height = max(1, self.canvas.winfo_width()), max(1, self.canvas.winfo_height())
         if self.view_vars["grid"].get():
@@ -205,33 +211,76 @@ class Editor(tk.Tk):
             for y in range(0, height, 100): self.canvas.create_line(0, y, width, y, fill="#dedbd0", tags=("map",))
         candidates = self.index.query(self.visible_bbox(80)) if self.index.items else []
         candidates.sort(key=lambda item: 0 if item.section.name.upper() in {"POLYGON", "RGN80"} else 1)
-        primitives = 0; limited = False
-        for item in candidates:
-            obj = item.section
-            object_tag = f"object-{id(obj)}"
-            if not self._visible_at_level(obj, item): continue
-            coords = obj.coordinates(); stride = self._generalization_stride(coords)
-            if stride > 1 and len(coords) > 2: coords = coords[::stride] + ([coords[-1]] if coords[-1] != coords[::stride][-1] else [])
-            points = [self.world_to_screen(lat, lon) for lat, lon in coords]
-            if not points: continue
-            selected = obj in self.selected; kind = obj.name.upper()
-            if kind in {"POI", "RGN10", "RGN20"}:
-                x, y = points[0]; self.canvas.create_oval(x-4, y-4, x+4, y+4, fill="#5b6573", outline="#1769aa" if selected else "#30343a", width=3 if selected else 1, tags=("map",object_tag)); primitives += 1
-            elif kind in {"POLYGON", "RGN80"} and len(points) >= 2:
-                flat = [v for p in points for v in p]; fill = "" if self.view_vars["transparent_polygons"].get() else "#b9c5b3"; outline = "#1769aa" if selected else ("#6d7868" if self.view_vars["polygon_outlines"].get() else fill)
-                self.canvas.create_polygon(*flat, fill=fill, outline=outline, width=3 if selected else 1, tags=("map",object_tag)); primitives += 1
-            elif len(points) >= 2:
-                flat = [v for p in points for v in p]; self.canvas.create_line(*flat, fill="#1769aa" if selected else "#60666d", width=4 if selected else 2, tags=("map",object_tag)); primitives += 1
-            if self.view_vars["labels"].get() and obj.get("Label") and points and self.zoom >= .2:
-                x, y = points[0]; self.canvas.create_text(x+5, y-7, text=obj.get("Label"), anchor="sw", fill="#202124", tags=("map",object_tag)); primitives += 1
-            if primitives >= MAX_PRIMITIVES: limited = True; break
+        self.render_state = {
+            "generation": generation, "started": started, "candidates": candidates,
+            "position": 0, "primitives": 0, "reason": self.render_reason,
+        }
+        self.status.set(f"Отрисовка: 0 / {len(candidates):,}")
+        self.after_idle(lambda: self._render_chunk(generation))
+
+    def _render_chunk(self, generation):
+        state = self.render_state
+        if not state or generation != self.render_generation or state["generation"] != generation:
+            return
+        chunk_started = time.perf_counter(); candidates = state["candidates"]
+        while state["position"] < len(candidates) and state["primitives"] < MAX_PRIMITIVES:
+            item = candidates[state["position"]]; state["position"] += 1
+            state["primitives"] += self._draw_object(item)
+            if time.perf_counter() - chunk_started >= RENDER_BUDGET_SECONDS:
+                self.status.set(f"Отрисовка: {state['position']:,} / {len(candidates):,}")
+                self.after(1, lambda: self._render_chunk(generation))
+                return
+        limited = state["primitives"] >= MAX_PRIMITIVES and state["position"] < len(candidates)
+        self._draw_overlays()
+        elapsed = time.perf_counter() - state["started"]
+        reason = "first_frame" if self.first_frame_pending else state["reason"]
+        self.first_frame_pending = False
+        self._metric(reason, elapsed, f"candidates={len(candidates)} primitives={state['primitives']}")
+        self.render_reason = "viewport"; self.render_state = None
+        suffix = f" — достигнут лимит {MAX_PRIMITIVES:,}, увеличьте масштаб" if limited else ""
+        self.status.set(f"Вид: {len(candidates):,} кандидатов, {state['primitives']:,} примитивов, {elapsed*1000:.0f} мс{suffix}")
+
+    def _draw_object(self, item):
+        obj = item.section
+        if not self._visible_at_level(obj, item): return 0
+        object_tag = f"object-{id(obj)}"
+        coords = obj.coordinates(self.level.get()); stride = self._generalization_stride(coords)
+        if stride > 1 and len(coords) > 2:
+            reduced = coords[::stride]; coords = reduced + ([coords[-1]] if coords[-1] != reduced[-1] else [])
+        points = [self.world_to_screen(lat, lon) for lat, lon in coords]
+        if not points: return 0
+        primitives = 0; selected = obj in self.selected; kind = obj.name.upper()
+        if kind in {"POI", "RGN10", "RGN20"}:
+            x, y = points[0]; self.canvas.create_oval(x-4, y-4, x+4, y+4, fill="#5b6573", outline="#1769aa" if selected else "#30343a", width=3 if selected else 1, tags=("map",object_tag)); primitives += 1
+        elif kind in {"POLYGON", "RGN80"} and len(points) >= 2:
+            flat = [v for p in points for v in p]; fill = "" if self.view_vars["transparent_polygons"].get() else "#b9c5b3"; outline = "#1769aa" if selected else ("#6d7868" if self.view_vars["polygon_outlines"].get() else fill)
+            self.canvas.create_polygon(*flat, fill=fill, outline=outline, width=3 if selected else 1, tags=("map",object_tag)); primitives += 1
+        elif len(points) >= 2:
+            flat = [v for p in points for v in p]; self.canvas.create_line(*flat, fill="#1769aa" if selected else "#60666d", width=4 if selected else 2, tags=("map",object_tag)); primitives += 1
+        if self.view_vars["labels"].get() and obj.get("Label") and self.zoom >= .2:
+            x, y = points[0]; self.canvas.create_text(x+5, y-7, text=obj.get("Label"), anchor="sw", fill="#202124", tags=("map",object_tag)); primitives += 1
+        return primitives
+
+    def _draw_overlays(self):
+        if self.pending:
+            points=[self.world_to_screen(*point) for point in self.pending]
+            if len(points)>1:self.canvas.create_line(*[value for point in points for value in point],fill="#e67e22",dash=(4,2),width=2,tags=("overlay",))
+            for x,y in points:self.canvas.create_oval(x-3,y-3,x+3,y+3,fill="#ffffff",outline="#e67e22",tags=("overlay",))
         if self.goto_marker:
             x, y = self.world_to_screen(*self.goto_marker); self.canvas.create_line(x-10, y, x+10, y, fill="#d12d2d", width=2, tags=("overlay",)); self.canvas.create_line(x, y-10, x, y+10, fill="#d12d2d", width=2, tags=("overlay",))
-        elapsed = time.perf_counter() - started; reason="first_frame" if self.first_frame_pending else self.render_reason; self.first_frame_pending=False; self._metric(reason, elapsed, f"candidates={len(candidates)} primitives={primitives}"); self.render_reason="viewport"
-        suffix = f" — достигнут лимит {MAX_PRIMITIVES:,}, увеличьте масштаб" if limited else ""
-        self.status.set(f"Вид: {len(candidates):,} кандидатов, {primitives:,} примитивов, {elapsed*1000:.0f} мс{suffix}")
+        if self.mode == "nodes" and len(self.selected) == 1:
+            active = self._active_data_level(self.selected[0])
+            for data_level, coords in self.selected[0].coordinate_groups():
+                if data_level != active: continue
+                for node_index, (lat, lon) in enumerate(coords):
+                    x, y = self.world_to_screen(lat, lon)
+                    self.canvas.create_rectangle(x-3, y-3, x+3, y+3, fill="#ffffff", outline="#1769aa", tags=("overlay", f"node-{data_level}-{node_index}"))
+
+    def _cancel_active_render(self):
+        self.render_generation += 1; self.render_state = None
 
     def schedule_render(self, delay=80, reason="viewport"):
+        self._cancel_active_render()
         if self.render_after: self.after_cancel(self.render_after)
         self.render_reason=reason
         self.render_after = self.after(delay, self.render_viewport)
@@ -279,15 +328,21 @@ class Editor(tk.Tk):
 
     def _on_resize(self, event):
         if self.resize_after: self.after_cancel(self.resize_after)
-        self.resize_after=self.after(100,self.render_viewport)
+        self._cancel_active_render(); self.resize_after=self.after(100,self.render_viewport)
 
     # ----- interaction ----------------------------------------------
     def on_press(self,event):
         self.canvas.focus_set(); self.drag_start=(event.x,event.y,*self.center); self.drag_preview=(0,0)
+        self._cancel_active_render()
         if self.mode=="pan": self.drag_kind="pan"; self.canvas.configure(cursor="fleur"); return
         if self.mode in {"POI","POLYLINE","POLYGON"}:
             self.pending.append(self.screen_to_world(event.x,event.y));
             if self.mode=="POI": self.finish_drawing()
+            else:self.render_viewport()
+            return
+        if self.mode == "nodes":
+            node = self._hit_node(event.x, event.y)
+            self.drag_kind = "node" if node else None; self.drag_node = node
             return
         hit=self.hit_test(event.x,event.y)
         if hit:
@@ -308,6 +363,8 @@ class Editor(tk.Tk):
         elif self.drag_kind=="objects" and abs(dx)+abs(dy)>=DRAG_THRESHOLD:
             for obj in self.selected:self.canvas.move(f"object-{id(obj)}",dx-self.drag_preview[0],dy-self.drag_preview[1])
             self.drag_preview=(dx,dy)
+        elif self.drag_kind=="node":
+            self.canvas.move("overlay",dx-self.drag_preview[0],dy-self.drag_preview[1]);self.drag_preview=(dx,dy)
 
     def on_release(self,event):
         if not self.drag_start:return
@@ -329,6 +386,10 @@ class Editor(tk.Tk):
             self.push_undo(); dlat=Decimal(str(-dy/(120*self.zoom)));dlon=Decimal(str(dx/(120*self.zoom)))
             for obj in self.selected:obj.translate(dlat,dlon)
             self.doc.dirty=True;self.rebuild_index();self.render_viewport()
+        elif self.drag_kind=="node" and abs(dx)+abs(dy)>=DRAG_THRESHOLD:
+            self.push_undo();data_level,node_index=self.drag_node;new_lat,new_lon=self.screen_to_world(event.x,event.y)
+            self.selected[0].move_node(data_level,node_index,Decimal(str(new_lat)),Decimal(str(new_lon)))
+            self.doc.dirty=True;self.rebuild_index();self.render_viewport()
         self.drag_start=None;self.drag_kind=None;self.drag_preview=(0,0);self.canvas.configure(cursor="arrow" if self.mode=="select" else "hand2")
 
     def hit_test(self,x,y):
@@ -336,10 +397,18 @@ class Editor(tk.Tk):
         for item in candidates:
             distance=self._screen_distance(item.section,x,y)
             if distance<=9:ranked.append((distance,item.section))
-        ranked.sort(key=lambda p:p[0]);return ranked[0][1] if ranked else None
+        ranked.sort(key=lambda p:p[0])
+        if not ranked:
+            self.last_hit_point=None;self.last_hit_ids=();self.hit_cycle=0;return None
+        hit_ids=tuple(id(section) for _,section in ranked)
+        same_point=self.last_hit_point and math.hypot(x-self.last_hit_point[0],y-self.last_hit_point[1])<=4
+        if same_point and hit_ids==self.last_hit_ids:self.hit_cycle=(self.hit_cycle+1)%len(ranked)
+        else:self.hit_cycle=0
+        self.last_hit_point=(x,y);self.last_hit_ids=hit_ids
+        return ranked[self.hit_cycle][1]
 
     def _screen_distance(self,obj,x,y):
-        points=[self.world_to_screen(a,b) for a,b in obj.coordinates()]
+        points=[self.world_to_screen(a,b) for a,b in obj.coordinates(self.level.get())]
         if not points:return math.inf
         if len(points)==1:return math.hypot(points[0][0]-x,points[0][1]-y)
         return min(self._segment_distance(x,y,*a,*b) for a,b in zip(points,points[1:]))
@@ -354,12 +423,29 @@ class Editor(tk.Tk):
         if self.drag_start and self.drag_kind=="pan":self.canvas.move("map",-self.drag_preview[0],-self.drag_preview[1])
         elif self.drag_start and self.drag_kind=="objects":
             for obj in self.selected:self.canvas.move(f"object-{id(obj)}",-self.drag_preview[0],-self.drag_preview[1])
+        elif self.drag_start and self.drag_kind=="node":self.canvas.move("overlay",-self.drag_preview[0],-self.drag_preview[1])
         self.drag_start=None;self.drag_kind=None;self.drag_preview=(0,0);self.pending=[];self.canvas.delete("selection-box");self.render_viewport()
 
     def on_double_click(self,event):
-        if self.mode in {"POLYLINE","POLYGON"}:self.finish_drawing()
+        if self.mode in {"POLYLINE","POLYGON"}:
+            if len(self.pending)>=2 and self.pending[-1]==self.pending[-2]:self.pending.pop()
+            self.finish_drawing()
 
     def on_motion(self,event):self.last_cursor_coordinate=self.screen_to_world(event.x,event.y)
+
+    def _active_data_level(self,obj):
+        groups=obj.coordinate_groups();eligible=[number for number,_ in groups if number<=self.level.get()]
+        return max(eligible) if eligible else (groups[0][0] if groups else 0)
+
+    def _hit_node(self,x,y):
+        if len(self.selected)!=1:return None
+        active=self._active_data_level(self.selected[0])
+        for data_level,coords in self.selected[0].coordinate_groups():
+            if data_level!=active:continue
+            for node_index,(lat,lon) in enumerate(coords):
+                px,py=self.world_to_screen(lat,lon)
+                if math.hypot(px-x,py-y)<=8:return data_level,node_index
+        return None
 
     # ----- context/location -----------------------------------------
     def on_context(self,event):
@@ -379,15 +465,26 @@ class Editor(tk.Tk):
     def paste_here(self):self._paste_at(*self.context_coordinate)
 
     # ----- document/editing ----------------------------------------
-    def new_file(self):self.doc=MpDocument([],[]);self.index.clear();self.selected=[];self.title("PolishMapAI — Без имени");self.render_viewport();self._update_commands()
+    def new_file(self):
+        if not self._can_discard_changes():return
+        self.doc=MpDocument([],[]);self.index.clear();self.selected=[];self.title("PolishMapAI — Без имени");self.render_viewport();self._update_commands()
     def close_file(self):self.new_file()
     def save_file(self):
         if self.doc.path is None:return self.save_as()
-        try:self.doc.save();self.status.set("Сохранено")
-        except Exception as exc:messagebox.showerror("Сохранение",str(exc))
+        try:self.doc.save();self.status.set("Сохранено");return True
+        except Exception as exc:messagebox.showerror("Сохранение",str(exc));return False
     def save_as(self):
         path=filedialog.asksaveasfilename(defaultextension=".mp",filetypes=[("Polish map","*.mp")])
-        if path:self.doc.save(path);self.title(f"PolishMapAI — {Path(path).name}")
+        if not path:return False
+        try:self.doc.save(path);self.title(f"PolishMapAI — {Path(path).name}");self.status.set("Сохранено");return True
+        except Exception as exc:messagebox.showerror("Сохранение",str(exc));return False
+    def _can_discard_changes(self):
+        if not self.doc.dirty:return True
+        choice=messagebox.askyesnocancel("Несохранённые изменения","Сохранить изменения карты?")
+        if choice is None:return False
+        return self.save_file() if choice else True
+    def request_exit(self):
+        if self._can_discard_changes():self.destroy()
     def push_undo(self):self.undo_stack.append(self.doc.snapshot());self.redo_stack.clear();self._update_commands()
     def undo(self):
         if not self.undo_stack:return
@@ -429,11 +526,12 @@ class Editor(tk.Tk):
     def invert_selection(self):
         chosen=set(id(x) for x in self.selected);self.selected=[x.section for x in self.index.items if id(x.section) not in chosen];self.refresh_properties();self.render_viewport()
     def rebuild_index(self):self.index.build(self.doc.objects())
-    def set_mode(self,mode):self.mode=mode;self.pending=[];self.canvas.configure(cursor="hand2" if mode=="pan" else "crosshair" if mode!="select" else "arrow");self.status.set(f"Режим: {mode}")
+    def set_mode(self,mode):self.mode=mode;self.pending=[];self.canvas.configure(cursor="hand2" if mode=="pan" else "crosshair" if mode in {"POI","POLYLINE","POLYGON"} else "arrow");self.status.set(f"Режим: {mode}");self.render_viewport()
     def finish_drawing(self):
         if not self.pending:return
         if self.mode=="POLYGON" and len(self.pending)>=3:self.pending.append(self.pending[0])
-        if self.mode!="POI" and len(self.pending)<2:return
+        if self.mode=="POLYLINE" and len(self.pending)<2:return
+        if self.mode=="POLYGON" and len(self.pending)<4:return
         self.push_undo();obj=self.doc.add_object(self.mode,self.pending);self.index.insert(obj);self.selected=[obj];self.pending=[];self.set_mode("select");self.refresh_properties();self.render_viewport()
     def refresh_properties(self):
         self.prop_tree.delete(*self.prop_tree.get_children());self.selection_label.configure(text=f"Выбрано: {len(self.selected)}")
@@ -450,7 +548,9 @@ class Editor(tk.Tk):
         if value is not None:
             self.push_undo()
             for obj in self.selected:obj.set(key,value,self.doc.newline)
-            self.doc.dirty=True;self.refresh_properties();self.render_viewport()
+            self.doc.dirty=True
+            if key.strip().lower() in {"nodeid","roadid"}:self.rebuild_index()
+            self.refresh_properties();self.render_viewport()
 
     # ----- dialogs/commands ----------------------------------------
     def goto_coordinates(self):
@@ -467,10 +567,13 @@ class Editor(tk.Tk):
     def find_object(self):
         query=simpledialog.askstring("Найти","Label, NodeID, RoadID или свойство:",parent=self)
         if not query:return
-        q=query.lower();found=[]
+        q=query.lower();found=[];seen=set()
+        for obj in [*self.index.find_node_id(query),*self.index.find_road_id(query)]:
+            if id(obj) not in seen:found.append(obj);seen.add(id(obj))
         for item in self.index.items:
             obj=item.section
-            if q in obj.get("Label").lower() or query in {obj.get("NodeID"),obj.get("RoadID")} or q in obj.render().lower():found.append(obj)
+            if id(obj) in seen:continue
+            if q in obj.get("Label").lower() or q in obj.render().lower():found.append(obj);seen.add(id(obj))
         if not found:messagebox.showinfo("Найти","Совпадений нет");return
         self.selected=found[:100];bbox=section_bbox(found[0]);self.center=[(bbox[1]+bbox[3])/2,(bbox[0]+bbox[2])/2];self.refresh_properties();self.render_viewport();self.status.set(f"Найдено: {len(found)}")
     def map_properties(self):messagebox.showinfo("Свойства карты",f"Файл: {self.doc.path or 'Без имени'}\nОбъектов: {len(self.index.items):,}\nКодировка: Windows-1251\nИзменена: {'да' if self.doc.dirty else 'нет'}")
@@ -520,7 +623,10 @@ class Editor(tk.Tk):
 def main():
     logging.basicConfig(level=logging.INFO,format="%(asctime)s %(name)s %(message)s")
     try:
-        Editor().mainloop()
+        if len(sys.argv) >= 3 and sys.argv[1] == "--smoke-test":
+            _run_gui_smoke(Path(sys.argv[2]))
+        else:
+            Editor().mainloop()
     except Exception:
         # Windowed PyInstaller builds have no stderr. Keep a deterministic
         # startup diagnostic beside the executable for CI and users.
@@ -529,3 +635,35 @@ def main():
                 traceback.format_exc(), encoding="utf-8"
             )
         raise
+
+
+def _run_gui_smoke(path: Path):
+    """Exercise load and progressive rendering in the packaged GUI."""
+    app = Editor(); started = time.perf_counter(); deadline = started + 45
+    heartbeat = {"last": started, "max_gap": 0.0, "count": 0, "error": ""}
+
+    def finish(error=""):
+        heartbeat["error"] = error
+        report = {
+            "ok": not error, "error": error, "objects": len(app.index.items),
+            "elapsed_seconds": time.perf_counter() - started,
+            "heartbeat_count": heartbeat["count"],
+            "max_heartbeat_gap_ms": heartbeat["max_gap"] * 1000,
+            "metrics": app.metrics,
+        }
+        report_path = Path(os.getenv("POLISHMAPAI_SMOKE_REPORT", "PolishMapAI-smoke.json"))
+        report_path.write_text(json.dumps(report, ensure_ascii=False, indent=2), "utf-8")
+        app.after(1, app.destroy)
+
+    def tick():
+        now = time.perf_counter(); heartbeat["count"] += 1
+        heartbeat["max_gap"] = max(heartbeat["max_gap"], now-heartbeat["last"]); heartbeat["last"] = now
+        if now >= deadline: finish("Timed out while loading or rendering the map"); return
+        if app.doc.path and not app.first_frame_pending and app.render_state is None:
+            finish(); return
+        app.after(25, tick)
+
+    app.after(100, lambda: app.open_path(path))
+    app.after(25, tick); app.mainloop()
+    if heartbeat["error"]:
+        raise RuntimeError(heartbeat["error"])

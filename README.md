@@ -6,9 +6,9 @@ PolishMapAI is an independent Windows cartographic editor focused on Garmin Poli
 
 - Windows-1251 MP open/save with byte-identical no-op saves.
 - Preservation of comments, unknown keys, section order, coordinate text, and line endings.
-- Map canvas, zoom, pan, selection, POI/polyline/polygon creation, move/delete, properties, Undo/Redo, search, detail-level filter, and geometry checks.
+- Responsive progressive map canvas, zoom, pan, selection, POI/polyline/polygon creation, object and node move/delete, properties, Undo/Redo, indexed NodeID/RoadID search, detail-level filter, and geometry checks.
 - Shapefile import/export (`SHP/SHX/DBF`, plus `PRJ/CPG` sidecars).
-- OpenAI-compatible REST adapter with custom Base URL/model/timeout/system prompt, GeoJSON validation and preview/accept workflow.
+- OpenAI-compatible REST adapter and GeoJSON validation core; editor workflow integration is a later milestone.
 - API secrets stored with Windows Credential Manager.
 - Windows CI, portable ZIP, and self-contained installer EXE build scripts.
 
@@ -30,5 +30,4 @@ Artifacts are written to `artifacts/`.
 
 ## Scope
 
-Version 0.1 is a working foundation, not yet feature-parity with the mature GPSMapEdit product. Routing restrictions, advanced node editing, format edge cases, projections, and large-map performance are tracked for iterative implementation.
-
+Version 0.2 is a working prototype, not yet feature-parity with the mature GPSMapEdit product. Routing restrictions, advanced road-graph editing, format edge cases, projections, and Garmin TYP rendering remain iterative milestones.

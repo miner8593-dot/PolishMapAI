@@ -19,7 +19,7 @@ def export_objects(path: str, document: MpDocument, kind: str) -> None:
         normalized = "POI" if obj.name.upper() in {"POI", "RGN10", "RGN20"} else "POLYLINE" if obj.name.upper() in {"POLYLINE", "RGN40"} else "POLYGON"
         if normalized != kind:
             continue
-        coords = [(float(lon), float(lat)) for lat, lon in obj.coordinates()]
+        coords = [(float(lon), float(lat)) for lat, lon in obj.coordinates(0)]
         if kind == "POI" and coords:
             writer.point(*coords[0])
         elif kind == "POLYLINE":
@@ -53,4 +53,3 @@ def import_objects(path: str, document: MpDocument) -> int:
         document.add_object(kind, points, Type=str(attrs.get("TYPE", "0x0")), Label=str(attrs.get("LABEL", "")))
         count += 1
     return count
-
