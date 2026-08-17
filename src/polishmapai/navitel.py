@@ -32,6 +32,7 @@ class NavitelStyle:
     order: int = 50
     symbol: str = "dot"
     label_color: str = "#1b1b1b"
+    stipple: str = ""
 
 
 _WATER_POLYGONS = {0x28, 0x2C, 0x3D, 0x3E, 0x3F, 0x40, 0x41, 0x42, 0x43, 0x44,

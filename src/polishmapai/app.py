@@ -68,6 +68,7 @@ class Editor(tk.Tk):
         self.pending: list[tuple[float, float]] = []
         self.zoom = 1.0; self.center = [0.0, 0.0]
         self.drag_start = None; self.drag_kind = None; self.drag_preview = (0, 0)
+        self.right_drag_start = None; self.right_drag_preview = (0, 0)
         self.undo_stack = []; self.redo_stack = []
         self.clipboard_objects: list[MpSection] = []
         self.level = tk.IntVar(value=0)
@@ -87,9 +88,12 @@ class Editor(tk.Tk):
         self.metrics: list[str] = []
         self.view_options = self._load_view_options()
         self.view_vars = {
-            name: tk.BooleanVar(value=value)
-            for name, value in self.view_options.items()
-            if isinstance(value, bool)
+            name: tk.BooleanVar(value=self.view_options[name])
+            for name in ("grid", "labels", "label_outline", "polygon_outlines", "transparent_polygons", "road_classes", "addresses", "coverage")
+        }
+        self.create_vars = {
+            name: tk.BooleanVar(value=self.view_options.get(name, False))
+            for name in ("request_type", "request_label", "show_new_properties")
         }
         self._build_menu(); self._build_ui(); self._bind_keys(); self._update_commands()
         self.protocol("WM_DELETE_WINDOW", self.request_exit)
@@ -146,6 +150,11 @@ class Editor(tk.Tk):
         favorites = tk.Menu(bar, tearoff=False); self._cmd(favorites, "Добавить текущий вид", self.add_favorite); self._cmd(favorites, "Список избранного…", self.show_favorites)
         tools = tk.Menu(bar, tearoff=False)
         for label, mode in [("Выбор объектов", "select"), ("Редактировать узлы", "nodes"), ("Перемещать карту", "pan"), ("Создать точку (POI)", "POI"), ("Создать полилинию", "POLYLINE"), ("Создать полигон", "POLYGON")]: self._cmd(tools, label, lambda m=mode: self.set_mode(m))
+        create_options=tk.Menu(tools,tearoff=False)
+        create_options.add_checkbutton(label="Запрашивать тип каждого нового объекта",variable=self.create_vars["request_type"],command=self._creation_option_changed)
+        create_options.add_checkbutton(label="Запрашивать подпись каждого нового объекта",variable=self.create_vars["request_label"],command=self._creation_option_changed)
+        create_options.add_checkbutton(label="Показывать свойства каждого нового объекта",variable=self.create_vars["show_new_properties"],command=self._creation_option_changed)
+        tools.add_cascade(label="Создание объектов",menu=create_options)
         tools.add_separator(); self._cmd(tools, "Выбрать тип создаваемого объекта…", self.choose_creation_type)
         self._cmd(tools, "Разделить полилинию в выбранном узле", self.split_selected_polyline)
         self._cmd(tools, "Соединить две полилинии", self.merge_selected_polylines)
@@ -179,7 +188,7 @@ class Editor(tk.Tk):
         # edited in a modal Properties window instead of a permanent sidebar.
         prop_frame = ttk.Frame(self)
         self.canvas = tk.Canvas(map_frame, background="#cbd8c3", cursor="arrow", highlightthickness=0); self.canvas.pack(fill="both", expand=True)
-        self.canvas.bind("<Configure>", self._on_resize); self.canvas.bind("<Button-1>", self.on_press); self.canvas.bind("<B1-Motion>", self.on_drag); self.canvas.bind("<ButtonRelease-1>", self.on_release); self.canvas.bind("<Double-Button-1>", self.on_double_click); self.canvas.bind("<Button-3>", self.on_context); self.canvas.bind("<Motion>", self.on_motion); self.canvas.bind("<MouseWheel>", self.on_wheel); self.canvas.bind("<Shift-MouseWheel>", self.on_wheel); self.canvas.bind("<Control-MouseWheel>", self.on_wheel)
+        self.canvas.bind("<Configure>", self._on_resize); self.canvas.bind("<Button-1>", self.on_press); self.canvas.bind("<B1-Motion>", self.on_drag); self.canvas.bind("<ButtonRelease-1>", self.on_release); self.canvas.bind("<Double-Button-1>", self.on_double_click); self.canvas.bind("<ButtonPress-3>", self.on_right_press); self.canvas.bind("<B3-Motion>", self.on_right_drag); self.canvas.bind("<ButtonRelease-3>", self.on_right_release); self.canvas.bind("<Motion>", self.on_motion); self.canvas.bind("<MouseWheel>", self.on_wheel); self.canvas.bind("<Shift-MouseWheel>", self.on_wheel); self.canvas.bind("<Control-MouseWheel>", self.on_wheel)
         self.selection_label = ttk.Label(prop_frame, text="Ничего не выбрано")
         self.prop_tree = ttk.Treeview(prop_frame, columns=("value",), show="tree headings"); self.prop_tree.heading("#0", text="Поле"); self.prop_tree.heading("value", text="Значение"); self.prop_tree.pack(fill="both", expand=True, pady=5); self.prop_tree.bind("<Double-1>", self.edit_property)
         progress_frame = ttk.Frame(self); progress_frame.pack(fill="x"); self.progress = ttk.Progressbar(progress_frame, mode="determinate"); self.cancel_button = ttk.Button(progress_frame, text="Отмена загрузки", command=self.loading_cancel.set)
@@ -302,7 +311,8 @@ class Editor(tk.Tk):
                 outline = "#1769aa" if selected else (style.outline if self.view_vars["polygon_outlines"].get() else fill)
                 self.canvas.create_polygon(*flat, fill=fill, outline=outline,
                                            width=3 if selected else 1,
-                                           dash=style.dash or (), tags=("map", object_tag)); primitives += 1
+                                           dash=style.dash or (), stipple=style.stipple if fill else "",
+                                           tags=("map", object_tag)); primitives += 1
         elif style.width:
             for points in point_groups:
                 if len(points)<2:continue
@@ -495,6 +505,23 @@ class Editor(tk.Tk):
             self.selected[0].move_node(data_level,node_index,Decimal(str(new_lat)),Decimal(str(new_lon)),occurrence)
             self.doc.dirty=True;self.rebuild_index();self.render_viewport()
         self.drag_start=None;self.drag_kind=None;self.drag_preview=(0,0);self.canvas.configure(cursor="arrow" if self.mode=="select" else "hand2")
+
+    def on_right_press(self,event):
+        self.right_drag_start=(event.x,event.y,*self.center);self.right_drag_preview=(0,0);self._cancel_active_render()
+
+    def on_right_drag(self,event):
+        if not self.right_drag_start:return
+        x,y,_,_=self.right_drag_start;dx,dy=event.x-x,event.y-y
+        if abs(dx)+abs(dy)>=DRAG_THRESHOLD:
+            self.canvas.configure(cursor="fleur");self.canvas.move("map",dx-self.right_drag_preview[0],dy-self.right_drag_preview[1]);self.right_drag_preview=(dx,dy)
+
+    def on_right_release(self,event):
+        if not self.right_drag_start:return
+        x,y,lat,lon=self.right_drag_start;dx,dy=event.x-x,event.y-y
+        self.right_drag_start=None;self.right_drag_preview=(0,0);self.canvas.configure(cursor="arrow" if self.mode!="pan" else "hand2")
+        if abs(dx)+abs(dy)<DRAG_THRESHOLD:
+            self.on_context(event);return
+        lon_scale=max(.05,math.cos(math.radians(lat)));self.center=[lat+dy/(120*self.zoom),lon-dx/(120*self.zoom*lon_scale)];self.schedule_render(30,"pan")
 
     def hit_test(self,x,y):
         lat,lon=self.screen_to_world(x,y); radius=8/(120*self.zoom); candidates=self.index.query((lon-radius,lat-radius,lon+radius,lat+radius)); ranked=[]
@@ -712,7 +739,18 @@ class Editor(tk.Tk):
         if self.mode=="POLYGON" and len(self.pending)>=3:self.pending.append(self.pending[0])
         if self.mode=="POLYLINE" and len(self.pending)<2:return
         if self.mode=="POLYGON" and len(self.pending)<4:return
-        self.push_undo();obj=self.doc.add_object(self.mode,self.pending,Type=f"0x{self.creation_types[self.mode]:X}");self.index.insert(obj);self.selected=[obj];self.pending=[];self.set_mode("select");self.refresh_properties();self.render_viewport()
+        code=self.creation_types[self.mode]
+        if self.create_vars["request_type"].get():
+            chosen=self._type_dialog(self.mode,code)
+            if chosen is None:return
+            code=chosen;self.creation_types[self.mode]=chosen
+        label=""
+        if self.create_vars["request_label"].get():
+            label=simpledialog.askstring("Подпись нового объекта","Label:",parent=self)
+            if label is None:return
+        show_properties=self.create_vars["show_new_properties"].get()
+        self.push_undo();obj=self.doc.add_object(self.mode,self.pending,Type=f"0x{code:X}",Label=label);self.index.insert(obj);self.selected=[obj];self.pending=[];self.set_mode("select");self.refresh_properties();self.render_viewport()
+        if show_properties:self.after_idle(self.show_object_properties)
     def refresh_properties(self):
         self.prop_tree.delete(*self.prop_tree.get_children());self.selection_label.configure(text=f"Выбрано: {len(self.selected)}")
         self.selection_status.set(f"Выбрано: {len(self.selected)}")
@@ -946,7 +984,7 @@ class Editor(tk.Tk):
     def _metric(self,name,elapsed,details=""):
         line=f"{time.strftime('%H:%M:%S')} {name}: {elapsed*1000:.1f} ms {details}";self.metrics.append(line);LOGGER.info(line)
     def _load_view_options(self):
-        defaults={"grid":True,"labels":True,"label_outline":False,"polygon_outlines":True,"transparent_polygons":False,"road_classes":False,"addresses":False,"coverage":False,"coordinate_format":"DD","favorites":[]}
+        defaults={"grid":True,"labels":True,"label_outline":False,"polygon_outlines":True,"transparent_polygons":False,"road_classes":False,"addresses":False,"coverage":False,"request_type":False,"request_label":False,"show_new_properties":False,"coordinate_format":"DD","favorites":[]}
         try:
             path=Path(os.getenv("APPDATA",Path.home()))/"PolishMapAI"/"settings.json";defaults.update(json.loads(path.read_text("utf-8")))
         except Exception:pass
@@ -955,6 +993,9 @@ class Editor(tk.Tk):
         for key,var in self.view_vars.items():self.view_options[key]=var.get()
         path=Path(os.getenv("APPDATA",Path.home()))/"PolishMapAI"/"settings.json";path.parent.mkdir(parents=True,exist_ok=True);path.write_text(json.dumps(self.view_options,ensure_ascii=False,indent=2),"utf-8")
     def _view_changed(self):self._save_view_options();self.render_viewport()
+    def _creation_option_changed(self):
+        for key,var in self.create_vars.items():self.view_options[key]=var.get()
+        self._save_view_options()
     def physical_scale(self):return int(max(1,100_000/max(self.zoom,.001)))
     def _sync_scale(self):self.scale_text.set(self._format_scale(self.physical_scale()))
     def _scale_selected(self,event=None):

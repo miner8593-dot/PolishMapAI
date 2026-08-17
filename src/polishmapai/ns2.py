@@ -44,6 +44,7 @@ class _PolygonEntry:
     fill: str
     outline: str
     label: str
+    pattern: int
 
 
 @dataclass(frozen=True)
@@ -95,10 +96,11 @@ class NavitelNs2Skin:
             if len(parts)<9 or not parts[0].lower().startswith("0x"):continue
             begin,end=type_code(parts[0]),type_code(parts[1])
             codes=range(begin,end+1) if end>=begin and end else (begin,)
-            try:scale=int(parts[-1]);fill=cls._color(parts[3],colors)
+            try:scale=int(parts[-1]);pattern=int(parts[2]);fill=cls._color(parts[3],colors)
             except ValueError:continue
+            if pattern == -2:fill=""
             outline=cls._color(parts[4],colors);label=cls._color(parts[6],colors)
-            entry=_PolygonEntry(scale,fill,outline,label)
+            entry=_PolygonEntry(scale,fill,outline,label,pattern)
             for code in codes:polygons.setdefault(code,[]).append(entry)
         lines: dict[int, list[_LineEntry]] = {}
         for line in blocks.get("polylines", []):
@@ -143,7 +145,8 @@ class NavitelNs2Skin:
         base=style_for_section(section);code=type_code(section.get("Type"));kind=object_kind(section.name)
         if kind=="polygon" and code in self.polygons:
             entry=self._best(self.polygons[code],scale)
-            return NavitelStyle(base.name,entry.fill,entry.outline or base.outline,order=base.order,label_color=entry.label or base.label_color)
+            stipple="" if entry.pattern<0 else ("gray12","gray25","gray50","gray75")[entry.pattern%4]
+            return NavitelStyle(base.name,entry.fill,entry.outline or base.outline,order=base.order,label_color=entry.label or base.label_color,stipple=stipple)
         if kind=="line" and code in self.lines:
             frc=road_class(section);eligible=[e for e in self.lines[code] if e.frc_begin<=frc<=e.frc_end]
             if eligible:
