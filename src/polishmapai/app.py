@@ -34,9 +34,10 @@ from tkinter import filedialog, messagebox, simpledialog, ttk
 from .coordinates import format_coordinates, parse_coordinates
 from .mp import MpDocument, MpSection, geometry_issues
 from .navitel import (
-    LINE_NAMES, POINT_NAMES, POLYGON_NAMES, object_kind, style_for, type_code,
-    type_name,
+    LINE_NAMES, POINT_NAMES, POLYGON_NAMES, object_kind, style_for_section,
+    type_code, type_name,
 )
+from .ns2 import NavitelNs2Skin
 from .shapefile_io import export_objects, import_objects
 from .spatial import BBox, IndexedObject, SpatialIndex, intersects, section_bbox
 
@@ -61,6 +62,7 @@ class Editor(tk.Tk):
         self.selected: list[MpSection] = []
         self.mode = "select"
         self.creation_types = {"POI": 0x2F00, "POLYLINE": 0x06, "POLYGON": 0x6C}
+        self.navitel_skin: NavitelNs2Skin | None = None
         self.pending: list[tuple[float, float]] = []
         self.zoom = 1.0; self.center = [0.0, 0.0]
         self.drag_start = None; self.drag_kind = None; self.drag_preview = (0, 0)
@@ -130,7 +132,7 @@ class Editor(tk.Tk):
         self.view_menu.add_cascade(label="Уровни детализации", menu=level_menu)
         self.skin_name = tk.StringVar(value="navitel-ng")
         theme = tk.Menu(self.view_menu, tearoff=False)
-        theme.add_radiobutton(label="Navitel (стандартное оформление NG)", value="navitel-ng", variable=self.skin_name, command=self.render_viewport)
+        theme.add_radiobutton(label="Navitel (стандартное оформление NG)", value="navitel-ng", variable=self.skin_name, command=self.reset_skin)
         theme.add_separator()
         self._cmd(theme, "Управление оформлениями…", self.manage_skins)
         self.view_menu.add_cascade(label="Оформление карты", menu=theme)
@@ -165,7 +167,7 @@ class Editor(tk.Tk):
         # GPSMapEdit keeps the map in the whole client area.  Object data is
         # edited in a modal Properties window instead of a permanent sidebar.
         prop_frame = ttk.Frame(self)
-        self.canvas = tk.Canvas(map_frame, background="#f5f2e9", cursor="arrow", highlightthickness=0); self.canvas.pack(fill="both", expand=True)
+        self.canvas = tk.Canvas(map_frame, background="#cbd8c3", cursor="arrow", highlightthickness=0); self.canvas.pack(fill="both", expand=True)
         self.canvas.bind("<Configure>", self._on_resize); self.canvas.bind("<Button-1>", self.on_press); self.canvas.bind("<B1-Motion>", self.on_drag); self.canvas.bind("<ButtonRelease-1>", self.on_release); self.canvas.bind("<Double-Button-1>", self.on_double_click); self.canvas.bind("<Button-3>", self.on_context); self.canvas.bind("<Motion>", self.on_motion); self.canvas.bind("<MouseWheel>", self.on_wheel); self.canvas.bind("<Shift-MouseWheel>", self.on_wheel); self.canvas.bind("<Control-MouseWheel>", self.on_wheel)
         self.selection_label = ttk.Label(prop_frame, text="Ничего не выбрано")
         self.prop_tree = ttk.Treeview(prop_frame, columns=("value",), show="tree headings"); self.prop_tree.heading("#0", text="Поле"); self.prop_tree.heading("value", text="Значение"); self.prop_tree.pack(fill="both", expand=True, pady=5); self.prop_tree.bind("<Double-1>", self.edit_property)
@@ -230,10 +232,10 @@ class Editor(tk.Tk):
         started = time.perf_counter(); self.canvas.delete("map"); self.canvas.delete("overlay")
         width, height = max(1, self.canvas.winfo_width()), max(1, self.canvas.winfo_height())
         if self.view_vars["grid"].get():
-            for x in range(0, width, 100): self.canvas.create_line(x, 0, x, height, fill="#e2ded3", tags=("map",))
-            for y in range(0, height, 100): self.canvas.create_line(0, y, width, y, fill="#e2ded3", tags=("map",))
+            for x in range(0, width, 100): self.canvas.create_line(x, 0, x, height, fill="#b9c9b2", tags=("map",))
+            for y in range(0, height, 100): self.canvas.create_line(0, y, width, y, fill="#b9c9b2", tags=("map",))
         candidates = self.index.query(self.visible_bbox(80)) if self.index.items else []
-        candidates.sort(key=lambda item: style_for(item.section.name, item.section.get("Type")).order)
+        candidates.sort(key=lambda item: self._style_for(item.section).order)
         self.render_state = {
             "generation": generation, "started": started, "candidates": candidates,
             "position": 0, "primitives": 0, "reason": self.render_reason,
@@ -277,7 +279,7 @@ class Editor(tk.Tk):
             if points:point_groups.append(points)
         if not point_groups:return 0
         primitives = 0; selected = obj in self.selected; kind = object_kind(obj.name)
-        style = style_for(obj.name, obj.get("Type"))
+        style = self._style_for(obj)
         if kind == "point":
             for points in point_groups:
                 primitives += self._draw_navitel_point(points[0], style, object_tag, selected)
@@ -813,10 +815,20 @@ class Editor(tk.Tk):
         frame=ttk.Frame(win,padding=12);frame.pack(fill="both",expand=True)
         ttk.Label(frame,text="Оформления для набора типов Navitel",font=("Segoe UI",10,"bold")).grid(row=0,column=0,columnspan=2,sticky="w",pady=(0,8))
         ttk.Label(frame,text="●",foreground="#5c8e43",font=("Segoe UI",16)).grid(row=1,column=0,padx=(0,8))
-        ttk.Label(frame,text="Navitel (стандартное оформление NG)\nВстроено, активно").grid(row=1,column=1,sticky="w")
+        current=(f"{self.navitel_skin.name} — NS2 v{self.navitel_skin.version}" if self.navitel_skin else "Navitel (стандартное оформление NG)")
+        ttk.Label(frame,text=f"{current}\nАктивно").grid(row=1,column=1,sticky="w")
         ttk.Separator(frame).grid(row=2,column=0,columnspan=2,sticky="ew",pady=10)
-        ttk.Label(frame,text="Для карт с TypeSet=NG применяется каталог типов Navitel.\nФайлы Garmin TYP к этому оформлению не относятся.",justify="left").grid(row=3,column=0,columnspan=2,sticky="w")
-        ttk.Button(frame,text="Закрыть",command=win.destroy).grid(row=4,column=1,sticky="e",pady=(12,0))
+        ttk.Label(frame,text="Поддерживаются картографические таблицы day.skin/night.skin\nиз архивов Navitel NS2. Garmin TYP к TypeSet=NG не относится.",justify="left").grid(row=3,column=0,columnspan=2,sticky="w")
+        buttons=ttk.Frame(frame);buttons.grid(row=4,column=0,columnspan=2,sticky="ew",pady=(12,0))
+        def load(night=False):
+            path=filedialog.askopenfilename(parent=win,title="Открыть оформление Navitel NS2",filetypes=[("Navitel skin","*.ns2"),("Все файлы","*.*")])
+            if not path:return
+            try:self.navitel_skin=NavitelNs2Skin.load(path,night);self.skin_name.set("navitel-ns2");self.canvas.configure(background=self.navitel_skin.background);self.status.set(f"Загружено оформление {self.navitel_skin.name}, NS2 v{self.navitel_skin.version}");self.render_viewport();win.destroy()
+            except Exception as exc:messagebox.showerror("Оформление NS2",str(exc),parent=win)
+        ttk.Button(buttons,text="Загрузить дневной NS2…",command=lambda:load(False)).pack(side="left",padx=(0,4))
+        ttk.Button(buttons,text="Загрузить ночной NS2…",command=lambda:load(True)).pack(side="left")
+        ttk.Button(buttons,text="Стандартное",command=lambda:(self.reset_skin(),win.destroy())).pack(side="left",padx=4)
+        ttk.Button(buttons,text="Закрыть",command=win.destroy).pack(side="right")
     def import_shapefile(self):
         path=filedialog.askopenfilename(filetypes=[("ESRI Shapefile","*.shp")])
         if path:self.push_undo();count=import_objects(path,self.doc);self.rebuild_index();self.zoom_all();self.status.set(f"Импортировано: {count}")
@@ -831,6 +843,12 @@ class Editor(tk.Tk):
     def neural_info(self):messagebox.showinfo("Нейросеть","Настройка REST-провайдера доступна в следующих очередях. Пункт не выполняет скрытых сетевых запросов.")
 
     # ----- settings/helpers ----------------------------------------
+    def _style_for(self,obj):
+        if not self.navitel_skin:return style_for_section(obj)
+        scale=max(2,min(30,round(2+math.log2(max(1,self.physical_scale()/10)))))
+        return self.navitel_skin.style_for(obj,scale)
+    def reset_skin(self):
+        self.navitel_skin=None;self.skin_name.set("navitel-ng");self.canvas.configure(background="#cbd8c3");self.status.set("Стандартное оформление Navitel NG");self.render_viewport()
     def _update_commands(self):
         # Tk menus remain responsive; state mirrors document/selection/history.
         for label,state in [("Отменить","normal" if self.undo_stack else "disabled"),("Вернуть","normal" if self.redo_stack else "disabled"),("Вырезать","normal" if self.selected else "disabled"),("Копировать","normal" if self.selected else "disabled"),("Вставить","normal" if self.clipboard_objects else "disabled"),("Удалить","normal" if self.selected else "disabled")]:

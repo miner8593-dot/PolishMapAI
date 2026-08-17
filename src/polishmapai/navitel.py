@@ -110,13 +110,13 @@ def polygon_style(value: str) -> NavitelStyle:
     code = type_code(value)
     name = POLYGON_NAMES.get(code, f"Полигон 0x{code:X}")
     if code in _WATER_POLYGONS:
-        return NavitelStyle(name, "#b7d9ef", "#7caac8", order=12, label_color="#356d96")
+        return NavitelStyle(name, "#99b3cc", "#7c9bb8", order=12, label_color="#30577d")
     if code == 0x4C:
         return NavitelStyle(name, "#d7e9ee", "#8bb7c5", dash=(3, 2), order=13)
     if code == 0x51:
-        return NavitelStyle(name, "#c9e3d8", "#8cafaa", order=16)
+        return NavitelStyle(name, "#dae5e3", "#a7beb9", order=16, label_color="#000080")
     if code in _FOREST_POLYGONS:
-        shade = "#c6dfb6" if code in {0x50, 0x81, 0x82} else "#d4e5c7"
+        shade = "#cbd8c3" if code in {0x50, 0x81, 0x82} else "#d5e5cb"
         return NavitelStyle(name, shade, "#9fbe8e", order=18, label_color="#3f6841")
     if code in _FIELD_POLYGONS:
         return NavitelStyle(name, "#e7edc8", "#c8cf9e", order=19)
@@ -135,11 +135,11 @@ def polygon_style(value: str) -> NavitelStyle:
     if code in {0x6A, 0x6B}:
         return NavitelStyle(name, "#ece7df", "#cec5b9", order=32)
     if code in _BUILDINGS:
-        fills = {0x6C: "#ead8c8", 0x6D: "#dfd2c4", 0x6E: "#e1d6ca", 0x6F: "#d9d2dc"}
-        return NavitelStyle(name, fills.get(code, "#e5ddd3"), "#b7a99a", order=40)
+        fills = {0x6C: "#e3d9d2", 0x6D: "#d7d5d3", 0x6E: "#d7d5d3", 0x6F: "#d7d5d3"}
+        return NavitelStyle(name, fills.get(code, "#d7d5d3"), "#848484", order=40)
     if code == 0x80:
         return NavitelStyle(name, "", "", order=90)
-    return NavitelStyle(name, "#e8e5dc", "#beb9ad", order=30)
+    return NavitelStyle(name, "#f2efe9", "#beb9ad", order=30)
 
 
 def line_style(value: str) -> NavitelStyle:
@@ -204,3 +204,31 @@ def style_for(section_name: str, value: str) -> NavitelStyle:
     if kind == "point":
         return point_style(value)
     return line_style(value)
+
+
+def road_class(section) -> int:
+    parts = section.get("RouteParam").split(",")
+    try:
+        return max(0, min(7, int(parts[1]))) if len(parts) > 1 else 0
+    except ValueError:
+        return 0
+
+
+def style_for_section(section) -> NavitelStyle:
+    """Resolve style using both type code and Navitel road class (FRC)."""
+    style = style_for(section.name, section.get("Type"))
+    code = type_code(section.get("Type"))
+    if object_kind(section.name) != "line" or not (0 <= code <= 0x0C):
+        return style
+    frc = road_class(section)
+    palette = {
+        0: ("#a8a7a5", "#8f8f8f", 3, 1),
+        1: ("#dfb547", "#be7f4d", 5, 1),
+        2: ("#dfb547", "#be7f4d", 5, 1),
+        3: ("#e4ca6f", "#c48a4e", 4, 1),
+        4: ("#f2dd98", "#ba9b68", 4, 1),
+    }
+    color, casing, width, border = palette.get(frc, palette[0])
+    return NavitelStyle(style.name, color=color, width=width, casing=casing,
+                        casing_width=width + border * 2, order=style.order,
+                        label_color=style.label_color)
